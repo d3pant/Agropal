@@ -1,6 +1,6 @@
 # Reboot the Earth — Wildfire Agricultural Advisory System
 
-An AI-powered wildfire monitoring and agricultural advisory system for farms anywhere in the United States. The farmer pins their location during onboarding — all agents use that pin as the source of truth. Detects fire threats in real time and activates downstream agents (Crop, Livestock, ERPC) when risk thresholds are crossed.
+An AI-powered wildfire monitoring and agricultural advisory system for farms anywhere in the United States. The farmer pins their location during onboarding — all agents use that pin as the source of truth. Detects fire threats in real time and activates downstream agents (Crop, Livestock, ERPC — the Economic Reporting & Policy Coordinator) when risk thresholds are crossed.
 
 ---
 
@@ -61,10 +61,10 @@ Threat levels used system-wide: `GREEN → WATCH → WARNING → CRITICAL → EM
 | Path | Description |
 |------|-------------|
 | `forecaster/forecaster.py` | Forecasting agent — threat assessment, gate condition, wake-up packet |
-| `forecaster/agents/econ_agent.py` | ERPC econ module — financial exposure, ROI action ranking |
-| `forecaster/agents/policy_agent.py` | ERPC policy module — aid/grant eligibility engine |
-| `forecaster/agents/insurance_agent.py` | ERPC insurance module — fills official USDA CCC-576 Notice of Loss form |
-| `forecaster/agents/report_agent.py` | Action briefing PDF — combines all agent outputs, 10 languages, evacuation checklist |
+| `erpc/econ_agent.py` | ERPC econ module — financial exposure, ROI action ranking |
+| `erpc/policy_agent.py` | ERPC policy module — aid/grant eligibility engine |
+| `erpc/insurance_agent.py` | ERPC insurance module — fills official USDA CCC-576 Notice of Loss form |
+| `erpc/report_agent.py` | Action briefing PDF — combines all agent outputs, 10 languages, evacuation checklist |
 | `forecaster/models/spread_model.py` | Rothermel fire spread model + Anderson ellipse |
 | `forecaster/data_sources/` | Data fetchers: NASA FIRMS, NDVI, Open-Meteo, NOAA, SDG&E |
 | `forecaster/predictors/` | WIFIRE + Pyrecast spread prediction integrations |
@@ -113,7 +113,7 @@ FWI and NDVI are displayed on the dashboard as weather context but never escalat
 
 ### Econ Agent (ERPC)
 
-`forecaster/agents/econ_agent.py` → `forecaster/output/econ_report.json`
+`erpc/econ_agent.py` → `forecaster/output/econ_report.json`
 
 Runs during Stage 2. Each cycle computes total financial exposure and produces a prioritized ROI action queue for the farmer dashboard.
 
@@ -166,7 +166,7 @@ When the crop agent hasn't run yet (threat level GREEN, or Groq unavailable), th
 
 ### Insurance Agent (ERPC)
 
-`forecaster/agents/insurance_agent.py` → `forecaster/output/ccc_576_filled.pdf`
+`erpc/insurance_agent.py` → `forecaster/output/ccc_576_filled.pdf`
 
 Runs post-event. Reads `econ_report.json` and `status.json` and fills the official USDA **CCC-576 (Notice of Loss)** PDF form using `pypdf`. The CCC-576 is the primary form for ELAP, LFP, LIP, and NAP claims — it must be filed within 30 days of the loss event at the local FSA office.
 
@@ -191,7 +191,7 @@ The agent pre-populates all fields it has data for and leaves the rest blank so 
 
 ### Policy Agent (ERPC)
 
-`forecaster/agents/policy_agent.py` → `forecaster/output/policy_report.json`
+`erpc/policy_agent.py` → `forecaster/output/policy_report.json`
 
 Runs post-event (after all-clear). Evaluates farm eligibility for 25+ wildfire recovery programs across USDA, FEMA, SBA, and CA state agencies. Outputs a ranked list (confirmed → likely → check_required → ineligible) with deadlines, required documents, and direct links.
 
@@ -201,7 +201,7 @@ Key logic: FEMA Disaster Declarations API is queried first — that single boole
 
 ### Report Agent
 
-`forecaster/agents/report_agent.py` → `forecaster/output/action_briefing[_<lang>].pdf`
+`erpc/report_agent.py` → `forecaster/output/action_briefing[_<lang>].pdf`
 
 Final stage of the pipeline. Pulls every other agent's output and renders a single comprehensive PDF the farmer (or stakeholder) can read on a phone or print. Produced in **English plus 9 other languages** on demand.
 
@@ -495,21 +495,21 @@ python forecaster.py --scenario fire_threat       # mock
 python forecaster.py --use-real-data              # live NASA FIRMS + Open-Meteo
 
 # Econ agent
-python -m forecaster.agents.econ_agent            # reads live crop + livestock output
-python -m forecaster.agents.econ_agent --dry-run  # mock data
+python -m erpc.econ_agent            # reads live crop + livestock output
+python -m erpc.econ_agent --dry-run  # mock data
 
 # Policy agent
-python -m forecaster.agents.policy_agent          # live FEMA + Grants.gov + Tavily
-python -m forecaster.agents.policy_agent --dry-run
+python -m erpc.policy_agent          # live FEMA + Grants.gov + Tavily
+python -m erpc.policy_agent --dry-run
 
 # Insurance agent
-python -m forecaster.agents.insurance_agent       # writes ccc_576_filled.pdf
+python -m erpc.insurance_agent       # writes ccc_576_filled.pdf
 
 # Report agent (action briefing)
-python -m forecaster.agents.report_agent                  # English
-python -m forecaster.agents.report_agent --lang es        # Spanish
-python -m forecaster.agents.report_agent --lang zh-CN     # Chinese
-python -m forecaster.agents.report_agent --lang ar        # Arabic (RTL applied)
+python -m erpc.report_agent                  # English
+python -m erpc.report_agent --lang es        # Spanish
+python -m erpc.report_agent --lang zh-CN     # Chinese
+python -m erpc.report_agent --lang ar        # Arabic (RTL applied)
 ```
 
 ### Environment

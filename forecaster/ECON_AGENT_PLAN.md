@@ -1,6 +1,6 @@
 # Econ Agent — Component Plan
 
-Part of the Economic Resilience & Policy Coordinator (ERPC). Activated during Stage 2
+Part of the Economic Reporting & Policy Coordinator (ERPC). Activated during Stage 2
 (fire threat active). Computes total financial exposure by category, then ranks all
 available response actions by ROI so the farmer has a single prioritized action list.
 
@@ -20,7 +20,7 @@ available response actions by ROI so the farmer has a single prioritized action 
 
 ## File Location
 
-`forecaster/agents/econ_agent.py`
+`erpc/econ_agent.py`
 
 Output written to: `forecaster/output/econ_report.json`
 

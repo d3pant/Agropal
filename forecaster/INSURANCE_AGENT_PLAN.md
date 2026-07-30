@@ -1,6 +1,6 @@
 # Insurance Agent — Component Plan
 
-Part of the Economic Resilience & Policy Coordinator (ERPC). Activated post-event
+Part of the Economic Reporting & Policy Coordinator (ERPC). Activated post-event
 (after Forecasting Agent issues all-clear). Reads outputs from the Econ and Policy
 agents and fills the official USDA CCC-576 (Notice of Loss) PDF form using pypdf.
 
@@ -24,7 +24,7 @@ agents and fills the official USDA CCC-576 (Notice of Loss) PDF form using pypdf
 
 ## File Location
 
-`forecaster/agents/insurance_agent.py`
+`erpc/insurance_agent.py`
 
 Form template: `forecaster/forms/ccc_576.pdf` (official USDA form, bundled for offline use)
 

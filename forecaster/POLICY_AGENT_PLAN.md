@@ -1,6 +1,6 @@
 # Policy Agent — Component Plan
 
-Part of the Economic Resilience & Policy Coordinator (ERPC). Activated post-event
+Part of the Economic Reporting & Policy Coordinator (ERPC). Activated post-event
 (all-clear signal from Forecasting Agent). Returns a structured eligibility list of
 aid programs, grants, subsidies, and recovery initiatives the farmer qualifies for.
 
@@ -22,7 +22,7 @@ aid programs, grants, subsidies, and recovery initiatives the farmer qualifies f
 
 ## File Location
 
-`forecaster/agents/policy_agent.py`
+`erpc/policy_agent.py`
 
 Output written to: `forecaster/output/policy_report.json`
 

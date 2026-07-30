@@ -21,3 +21,7 @@ forecaster/output/
 
 # Credentials
 config/credentials.json
+
+# Claude 
+.claude/
+CLAUDE.md

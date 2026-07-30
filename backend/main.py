@@ -645,7 +645,7 @@ def _run_econ_subprocess() -> Optional[dict]:
     import subprocess
     try:
         subprocess.run(
-            ["python3", "-m", "forecaster.agents.econ_agent"],
+            ["python3", "-m", "erpc.econ_agent"],
             cwd=Path(__file__).parent.parent,
             capture_output=True, text=True, timeout=60,
         )
@@ -669,7 +669,7 @@ def _run_policy_subprocess() -> Optional[dict]:
     import subprocess
     try:
         subprocess.run(
-            ["python3", "-m", "forecaster.agents.policy_agent"],
+            ["python3", "-m", "erpc.policy_agent"],
             cwd=Path(__file__).parent.parent,
             capture_output=True, text=True, timeout=60,
         )
@@ -702,7 +702,7 @@ def _run_insurance_subprocess() -> dict:
     import subprocess
     try:
         proc = subprocess.run(
-            ["python3", "-m", "forecaster.agents.insurance_agent"],
+            ["python3", "-m", "erpc.insurance_agent"],
             cwd=Path(__file__).parent.parent,
             capture_output=True, text=True, timeout=60,
         )
@@ -791,7 +791,7 @@ def _run_report_subprocess(lang: str = "en") -> dict:
     pdf_path = _report_pdf_path(lang)
     try:
         proc = subprocess.run(
-            ["python3", "-m", "forecaster.agents.report_agent", "--lang", lang],
+            ["python3", "-m", "erpc.report_agent", "--lang", lang],
             cwd=Path(__file__).parent.parent,
             capture_output=True, text=True, timeout=180,
         )
