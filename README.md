@@ -1,4 +1,4 @@
-# Reboot the Earth — Wildfire Agricultural Advisory System
+# Agropal — Wildfire Agricultural Advisory System
 
 An AI-powered wildfire monitoring and agricultural advisory system for farms anywhere in the United States. The farmer pins their location during onboarding — all agents use that pin as the source of truth. Detects fire threats in real time and activates downstream agents (Crop, Livestock, ERPC — the Economic Reporting & Policy Coordinator) when risk thresholds are crossed.
 
