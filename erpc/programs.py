@@ -500,3 +500,113 @@ PROGRAMS: list[ProgramSpec] = [
         report_declaration=True,
     ),
 ]
+
+
+# ---------------------------------------------------------------------------
+# External catalog (programs.json, next to this module)
+#
+# The records above are the built-in defaults. At import time they are
+# merged with erpc/programs.json when that file exists, so the catalog can
+# be maintained WITHOUT editing code:
+#   - edit a program's name / agency / category / link / required_docs /
+#     states by changing its entry (deadline / estimated_value / notes are
+#     overridable too when the built-in value is a plain string),
+#   - disable a program with "enabled": false,
+#   - add a NEW program as an entry with a fresh program_id and a "gate":
+#       {"gate": {"profile_true": ["has_livestock"],
+#                 "loss_true": ["forage_loss"]},
+#        "reason": "why it might apply"}
+#     Gate-added programs are reported as check_required when every gate
+#     condition holds for the farm, and omitted when one fails. Programs
+#     with complex eligibility formulas still need a ProgramSpec above —
+#     JSON carries data, not code.
+# A missing or invalid programs.json is not an error: built-in defaults
+# are used and a warning is logged.
+# ---------------------------------------------------------------------------
+
+import json as _json
+import logging as _logging
+from dataclasses import replace as _replace
+from pathlib import Path as _Path
+
+_catalog_logger = _logging.getLogger("erpc.programs")
+_PROGRAMS_JSON = _Path(__file__).with_name("programs.json")
+_OVERRIDABLE_FIELDS = ("name", "agency", "category", "link", "notes",
+                       "deadline", "estimated_value")
+
+
+def _generic_evaluate(entry: dict):
+    """Eligibility for a JSON-added program: gate conditions, then check."""
+    gate = entry.get("gate") or {}
+    reason = entry.get("reason") or (
+        "Listed in programs.json — verify eligibility with the agency")
+
+    def evaluate(ctx: "Ctx") -> "Verdict":
+        for key in gate.get("profile_true", []):
+            if not ctx.profile.get(key):
+                return None
+        for key in gate.get("loss_true", []):
+            if not ctx.loss.get(key):
+                return None
+        return "check_required", reason
+
+    return evaluate
+
+
+def _apply_catalog(specs: list[ProgramSpec]) -> list[ProgramSpec]:
+    """Merge programs.json over the built-in catalog. Never raises."""
+    try:
+        raw = _json.loads(_PROGRAMS_JSON.read_text())
+        entries = raw.get("programs", [])
+    except FileNotFoundError:
+        _catalog_logger.info("No programs.json — using built-in catalog only")
+        return specs
+    except Exception as exc:
+        _catalog_logger.warning("Could not load programs.json (%s) — "
+                                "using built-in catalog only", exc)
+        return specs
+
+    by_id = {entry.get("program_id"): entry for entry in entries
+             if isinstance(entry, dict) and entry.get("program_id")}
+    merged: list[ProgramSpec] = []
+    for spec in specs:
+        entry = by_id.pop(spec.program_id, None)
+        if entry is None:
+            merged.append(spec)
+            continue
+        if entry.get("enabled") is False:
+            _catalog_logger.info("Program %s disabled via programs.json",
+                                 spec.program_id)
+            continue
+        changes = {k: entry[k] for k in _OVERRIDABLE_FIELDS if k in entry}
+        if "required_docs" in entry:
+            changes["required_docs"] = tuple(entry["required_docs"])
+        if "states" in entry:
+            changes["states"] = tuple(entry["states"]) if entry["states"] else None
+        merged.append(_replace(spec, **changes) if changes else spec)
+
+    for program_id, entry in by_id.items():
+        if entry.get("enabled") is False:
+            continue
+        merged.append(ProgramSpec(
+            program_id=program_id,
+            name=entry.get("name", program_id),
+            agency=entry.get("agency", ""),
+            category=entry.get("category", "grant"),
+            link=entry.get("link", ""),
+            evaluate=_generic_evaluate(entry),
+            deadline=entry.get("deadline"),
+            deadline_trigger=entry.get("deadline_trigger"),
+            estimated_value=entry.get("estimated_value"),
+            required_docs=tuple(entry.get("required_docs", [])),
+            notes=entry.get("notes"),
+            requires_disaster_declaration=bool(
+                entry.get("requires_disaster_declaration", False)),
+            states=tuple(entry["states"]) if entry.get("states") else None,
+        ))
+        _catalog_logger.info("Program %s added via programs.json", program_id)
+
+    return merged
+
+
+PROGRAMS = _apply_catalog(PROGRAMS)

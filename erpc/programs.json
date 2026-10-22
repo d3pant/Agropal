@@ -1,0 +1,293 @@
+{
+  "programs": [
+    {
+      "program_id": "ELRP_2025",
+      "enabled": true,
+      "name": "Emergency Livestock Relief Program (ELRP) \u2014 Wildfire",
+      "agency": "USDA-FSA",
+      "category": "livestock",
+      "link": "https://www.fsa.usda.gov/resources/disaster-recovery/emergency-livestock-relief-program-elrp",
+      "required_docs": [
+        "Approved LFP application",
+        "Livestock inventory records"
+      ],
+      "states": null
+    },
+    {
+      "program_id": "ELAP",
+      "enabled": true,
+      "name": "Emergency Assistance for Livestock, Honeybees & Farm-Raised Fish (ELAP)",
+      "agency": "USDA-FSA",
+      "category": "livestock",
+      "link": "https://www.fsa.usda.gov/programs-and-services/disaster-assistance-program/emergency-assist-for-livestock-honey-bees-fish/index",
+      "required_docs": [
+        "Notice of Loss (within 30 days)",
+        "Feed/water cost receipts",
+        "Livestock inventory"
+      ],
+      "states": null
+    },
+    {
+      "program_id": "LFP",
+      "enabled": true,
+      "name": "Livestock Forage Disaster Program (LFP)",
+      "agency": "USDA-FSA",
+      "category": "livestock",
+      "link": "https://www.fsa.usda.gov/resources/disaster-recovery/livestock-forage-disaster-program-lfp",
+      "required_docs": [
+        "Livestock inventory",
+        "Grazing lease or deed",
+        "Evidence of forage loss"
+      ],
+      "states": null
+    },
+    {
+      "program_id": "LIP",
+      "enabled": true,
+      "name": "Livestock Indemnity Program (LIP)",
+      "agency": "USDA-FSA",
+      "category": "livestock",
+      "link": "https://www.fsa.usda.gov/programs-and-services/disaster-assistance-program/livestock-indemnity/index",
+      "required_docs": [
+        "Notice of Loss",
+        "Livestock inventory pre-event",
+        "Death records / veterinary documentation"
+      ],
+      "states": null
+    },
+    {
+      "program_id": "NAP",
+      "enabled": true,
+      "name": "Noninsured Crop Disaster Assistance Program (NAP)",
+      "agency": "USDA-FSA",
+      "category": "crop",
+      "link": "https://www.fsa.usda.gov/programs-and-services/disaster-assistance-program/noninsured-assistance/index",
+      "required_docs": [
+        "NAP coverage certification",
+        "Production records",
+        "Loss documentation"
+      ],
+      "states": null
+    },
+    {
+      "program_id": "ECP",
+      "enabled": true,
+      "name": "Emergency Conservation Program (ECP)",
+      "agency": "USDA-FSA",
+      "category": "conservation",
+      "link": "https://www.fsa.usda.gov/programs-and-services/conservation-programs/emergency-conservation/index",
+      "required_docs": [
+        "Damage assessment",
+        "Cost estimates for repairs",
+        "Farm ownership / lease documentation"
+      ],
+      "states": null
+    },
+    {
+      "program_id": "EFRP",
+      "enabled": true,
+      "name": "Emergency Forest Restoration Program (EFRP)",
+      "agency": "USDA-FSA",
+      "category": "conservation",
+      "link": "https://www.fsa.usda.gov/programs-and-services/conservation-programs/emergency-forest-restoration/index",
+      "required_docs": [
+        "Forest management plan",
+        "Damage documentation",
+        "Land ownership records"
+      ],
+      "states": null
+    },
+    {
+      "program_id": "SDRP_2324",
+      "enabled": true,
+      "name": "Supplemental Disaster Relief Program (SDRP) \u2014 2023/2024",
+      "agency": "USDA-FSA",
+      "category": "crop",
+      "link": "https://www.fsa.usda.gov/resources/programs/20232024-supplemental-disaster-assistance",
+      "required_docs": [
+        "Crop insurance records (Stage 1)",
+        "Production records (Stage 2)",
+        "Evidence of revenue loss"
+      ],
+      "states": null
+    },
+    {
+      "program_id": "FSA_LOAN",
+      "enabled": true,
+      "name": "FSA Emergency Farm Loans",
+      "agency": "USDA-FSA",
+      "category": "loan",
+      "link": "https://www.fsa.usda.gov/programs-and-services/farm-loan-programs/emergency-farm-loans/index",
+      "required_docs": [
+        "Federal disaster declaration",
+        "Farm financial records",
+        "Loss documentation",
+        "Tax returns (3 years)"
+      ],
+      "states": null
+    },
+    {
+      "program_id": "EQIP_FIRE",
+      "enabled": true,
+      "name": "Environmental Quality Incentives Program (EQIP) \u2014 Wildfire",
+      "agency": "USDA-NRCS",
+      "category": "conservation",
+      "link": "https://www.nrcs.usda.gov/programs-and-initiatives/eqip-environmental-quality-incentives",
+      "required_docs": [
+        "Farm plan",
+        "NRCS application",
+        "Land documentation"
+      ],
+      "states": null
+    },
+    {
+      "program_id": "EWP",
+      "enabled": true,
+      "name": "Emergency Watershed Protection (EWP) Program",
+      "agency": "USDA-NRCS",
+      "category": "conservation",
+      "link": "https://www.nrcs.usda.gov/programs-and-initiatives/ewp-emergency-watershed-protection-program",
+      "required_docs": [
+        "Formal request to NRCS state conservationist",
+        "Site damage documentation"
+      ],
+      "states": null
+    },
+    {
+      "program_id": "FEMA_IA",
+      "enabled": true,
+      "name": "FEMA Individual Assistance (IA)",
+      "agency": "FEMA",
+      "category": "mitigation",
+      "link": "https://www.disasterassistance.gov",
+      "required_docs": [
+        "Disaster declaration number",
+        "Proof of ownership/occupancy",
+        "Insurance documentation"
+      ],
+      "states": null
+    },
+    {
+      "program_id": "FEMA_FMAG",
+      "enabled": true,
+      "name": "FEMA Fire Management Assistance Grant (FMAG)",
+      "agency": "FEMA",
+      "category": "mitigation",
+      "link": "https://www.fema.gov/assistance/public/fire-management-assistance",
+      "required_docs": [],
+      "states": null
+    },
+    {
+      "program_id": "FEMA_HMGP",
+      "enabled": true,
+      "name": "FEMA Hazard Mitigation Grant Program (HMGP) \u2014 Post Fire",
+      "agency": "FEMA",
+      "category": "mitigation",
+      "link": "https://www.fema.gov/grants/mitigation/hazard-mitigation",
+      "required_docs": [
+        "Disaster declaration number",
+        "Project proposal",
+        "Cost-benefit analysis"
+      ],
+      "states": null
+    },
+    {
+      "program_id": "SBA_EIDL",
+      "enabled": true,
+      "name": "SBA Economic Injury Disaster Loans (EIDL)",
+      "agency": "SBA",
+      "category": "loan",
+      "link": "https://www.sba.gov/funding-programs/disaster-assistance",
+      "required_docs": [
+        "SBA disaster declaration",
+        "Business financial statements (3 years)",
+        "Personal financial statement",
+        "Tax returns"
+      ],
+      "states": null
+    },
+    {
+      "program_id": "FAO_FIRE_HUB",
+      "enabled": true,
+      "name": "FAO Global Fire Management Hub",
+      "agency": "UN/FAO",
+      "category": "international",
+      "link": "https://www.fao.org/partnerships/fire-hub/en",
+      "required_docs": [],
+      "states": null
+    },
+    {
+      "program_id": "GCF_FAO",
+      "enabled": true,
+      "name": "Green Climate Fund (GCF) via FAO",
+      "agency": "UN/FAO",
+      "category": "international",
+      "link": "https://www.greenclimate.fund/ae/fao",
+      "required_docs": [],
+      "states": null
+    },
+    {
+      "program_id": "CDFA_ERL",
+      "enabled": true,
+      "name": "CA Dept of Food & Agriculture \u2014 Emergency Relief Programs",
+      "agency": "CDFA",
+      "category": "state",
+      "link": "https://www.cdfa.ca.gov/grants/",
+      "required_docs": [
+        "CA farm registration",
+        "Loss documentation",
+        "Governor's emergency declaration number"
+      ],
+      "states": [
+        "CA"
+      ]
+    },
+    {
+      "program_id": "CALFIRE_FRAP",
+      "enabled": true,
+      "name": "CAL FIRE \u2014 Forest Health Grants",
+      "agency": "CAL FIRE",
+      "category": "state",
+      "link": "https://www.fire.ca.gov/grants",
+      "required_docs": [
+        "Timber Production Zone designation or equivalent",
+        "Reforestation/fire resilience project plan"
+      ],
+      "states": [
+        "CA"
+      ]
+    },
+    {
+      "program_id": "CDFA_OEFI",
+      "enabled": true,
+      "name": "CA Office of Emergency Food and Farming Infrastructure (OEFI)",
+      "agency": "CDFA",
+      "category": "state",
+      "link": "https://www.cdfa.ca.gov/oefi/",
+      "required_docs": [
+        "CA farm registration",
+        "Evidence of disaster-related disruption",
+        "Project proposal"
+      ],
+      "states": [
+        "CA"
+      ]
+    },
+    {
+      "program_id": "CA_EDD_DISASTER",
+      "enabled": true,
+      "name": "CA EDD Disaster Unemployment Assistance",
+      "agency": "CA EDD",
+      "category": "state",
+      "link": "https://edd.ca.gov/en/unemployment/disaster/",
+      "required_docs": [
+        "Proof of self-employment or farm income",
+        "Disaster declaration number",
+        "Evidence of lost work"
+      ],
+      "states": [
+        "CA"
+      ]
+    }
+  ]
+}

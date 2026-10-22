@@ -122,7 +122,8 @@ def _build_farm_profile(farm_config: dict) -> dict:
     return profile
 
 
-# Hardcoded loss summary — replace with real data from Crop + Livestock agents.
+# Dry-run loss summary — used ONLY for --dry-run. Live runs derive every
+# field from agent data in _derive_loss_from_jsons (see NO_LOSS below).
 # See POLICY_AGENT_PLAN.md — "Loss Summary Input" section.
 HARDCODED_LOSS_SUMMARY = {
     "crop_loss": True,
@@ -230,9 +231,44 @@ def _check_fema_declaration(state: str, county: str) -> Optional[bool]:
 # Loss summary from JSONs (Tavily enrichment)
 # ---------------------------------------------------------------------------
 
+# Baseline for live derivation: nothing is assumed. Every flag below starts
+# False and is only set when agent data actually evidences it — previously
+# several flags (forage_loss, infrastructure_damage) defaulted to True from
+# HARDCODED_LOSS_SUMMARY, which now serves --dry-run only.
+NO_LOSS = {
+    "crop_loss": False,
+    "livestock_loss": False,
+    "livestock_deaths": False,
+    "forage_loss": False,
+    "infrastructure_damage": False,
+    "forested_parcel_damage": False,
+    "watershed_damage": False,
+    "economic_injury": False,
+}
+
+# Crop categories that count as forage/grazing production, and as woody
+# perennial (orchard/timber) plantings for forested-parcel damage.
+FORAGE_CROPS = {"hay", "alfalfa", "forage", "pasture", "silage", "grass", "oats"}
+TREE_CROPS = {"avocado", "almond", "almonds", "citrus", "walnut", "olive",
+              "pistachio", "orchard", "timber", "forest", "vineyard", "grapes"}
+
+# A fire this close at CRITICAL/EMERGENCY threat is treated as watershed
+# damage (ash/debris runoff risk) for EWP purposes. Heuristic — tune here.
+WATERSHED_FIRE_DISTANCE_KM = 25.0
+WATERSHED_THREAT_LEVELS = {"CRITICAL", "EMERGENCY"}
+
+
 def _derive_loss_from_jsons() -> dict:
-    """Read crop + livestock JSONs. Returns loss_summary with _numeric passthrough."""
-    loss = dict(HARDCODED_LOSS_SUMMARY)
+    """Derive the loss summary entirely from live agent outputs.
+
+    Starts from NO_LOSS (nothing assumed) and sets each flag only on
+    evidence: livestock/crop JSONs for animal and crop losses, forage and
+    tree-crop destructions for forage/forested damage, abandoned fields
+    for infrastructure damage, and forecaster status (threat level + fire
+    distance) for watershed damage. Returns loss_summary with _numeric
+    passthrough.
+    """
+    loss = dict(NO_LOSS)
     numeric = {
         "crop_loss_usd": 0.0,
         "crop_confidence_adjusted_loss_usd": 0.0,
@@ -251,6 +287,9 @@ def _derive_loss_from_jsons() -> dict:
         numeric["transport_costs_usd"] = lv.get("transport_costs_usd", 0)
         loss["livestock_loss"] = numeric["livestock_value_at_risk_usd"] > 0
         loss["livestock_deaths"] = numeric["livestock_potential_loss_usd"] > 0
+        # A herd with value in the fire zone grazes that land — its forage
+        # is exposed with it. No herd at risk, no forage claim from here.
+        loss["forage_loss"] = loss["livestock_loss"]
         logger.info("Derived livestock loss: at_risk=$%s", numeric["livestock_value_at_risk_usd"])
     else:
         logger.warning("Could not read %s", LIVESTOCK_ERPC_MSG.name)
@@ -261,11 +300,29 @@ def _derive_loss_from_jsons() -> dict:
         numeric["crop_loss_usd"] = ei.get("total_estimated_loss_usd", 0)
         numeric["crop_confidence_adjusted_loss_usd"] = ei.get("total_confidence_adjusted_loss_usd", 0)
         loss["crop_loss"] = numeric["crop_loss_usd"] > 0
-        abandoned = any(d.get("decision") == "ABANDON" for d in crop["task4"])
-        loss["infrastructure_damage"] = abandoned or HARDCODED_LOSS_SUMMARY["infrastructure_damage"]
+        destructions = ei.get("crop_destructions", [])
+        destroyed_crops = {(d.get("crop_category") or "").strip().lower()
+                             for d in destructions}
+        if destroyed_crops & FORAGE_CROPS:
+            loss["forage_loss"] = True
+        if destroyed_crops & TREE_CROPS:
+            loss["forested_parcel_damage"] = True
+        # Infrastructure damage only on evidence: a field the crop agent
+        # decided to abandon outright. (Previously defaulted to True.)
+        loss["infrastructure_damage"] = any(
+            d.get("decision") == "ABANDON" for d in crop["task4"]
+        )
         logger.info("Derived crop loss from %s: total=$%s", crop_path.name, numeric["crop_loss_usd"])
     else:
         logger.warning("No crop agent output found — crop loss treated as unknown")
+
+    status = load_json(STATUS_JSON)
+    threat = status.get("threat_level", "")
+    distance = (status.get("nearest_fire") or {}).get("distance_km")
+    if threat in WATERSHED_THREAT_LEVELS and distance is not None \
+            and distance <= WATERSHED_FIRE_DISTANCE_KM:
+        loss["watershed_damage"] = True
+        logger.info("Watershed damage inferred: %s fire %.1f km away", threat, distance)
 
     loss["economic_injury"] = numeric["crop_loss_usd"] > 0 or numeric["livestock_value_at_risk_usd"] > 0
     loss["_numeric"] = numeric
