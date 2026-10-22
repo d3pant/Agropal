@@ -665,16 +665,26 @@ POLICY_REPORT = FORECASTER_DIR / "output" / "policy_report.json"
 
 
 def _run_policy_subprocess() -> Optional[dict]:
-    """Run policy agent and return policy_report.json contents (or None on failure)."""
+    """Run policy agent and return policy_report.json contents (or None on failure).
+
+    Failures are logged with the agent's stderr — previously they were
+    swallowed silently, which made it look like the policy step never ran
+    in the pipeline when it had actually crashed.
+    """
+    import logging
     import subprocess
+    log = logging.getLogger("backend.policy")
     try:
-        subprocess.run(
+        proc = subprocess.run(
             ["python3", "-m", "erpc.policy_agent"],
             cwd=Path(__file__).parent.parent,
             capture_output=True, text=True, timeout=60,
         )
-    except Exception:
-        pass
+        if proc.returncode != 0:
+            log.error("Policy agent exited %d: %s",
+                      proc.returncode, (proc.stderr or proc.stdout or "")[-1000:])
+    except Exception as exc:
+        log.error("Policy agent subprocess failed: %s", exc)
     if POLICY_REPORT.exists():
         try:
             with open(POLICY_REPORT) as f:

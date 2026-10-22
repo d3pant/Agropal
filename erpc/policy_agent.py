@@ -7,14 +7,17 @@ initiatives. Writes output/policy_report.json.
 Usage:
     python policy_agent.py [--status path/to/status.json] [--dry-run]
 
-All farm profile fields (insurance status, land types, etc.) are hardcoded
-constants in FARM_PROFILE below. Make dynamic by moving to farm_config.json
-or farmer_profile.json and injecting at runtime — no changes needed to the
-eligibility engine itself.
+The farm profile is built at runtime by `_build_farm_profile` from the
+farmer's own data — farm_config.json zones, farm_fields.json, and the
+livestock agent's farm_profile.json — with any explicit answers the farmer
+gave at setup (a "policy_profile" object in farm_config.json) taking
+precedence. FARM_PROFILE below only supplies defaults for fields that
+cannot be derived from farm data (insurance elections, underserved status).
 """
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass, field, asdict
@@ -27,7 +30,8 @@ from dotenv import load_dotenv
 
 from erpc.programs import PROGRAMS, Ctx, resolve
 from erpc.common import (
-    DATA_DIR, FARM_CONFIG, LIVESTOCK_ERPC_MSG, POLICY_REPORT, REPO_ROOT,
+    DATA_DIR, FARM_CONFIG, FARM_FIELDS_JSON, LIVESTOCK_DIR, LIVESTOCK_ERPC_MSG,
+    POLICY_REPORT, REPO_ROOT,
     STATUS_JSON, get_logger, latest_crop_output, load_crop_output, load_json,
     write_report,
 )
@@ -40,9 +44,12 @@ DEADLINES_CACHE = DATA_DIR / "program_deadlines_cache.json"
 DEADLINES_CACHE_MAX_AGE_DAYS = 7
 
 # ---------------------------------------------------------------------------
-# Hardcoded farm profile
-# All booleans below should eventually come from farm_config.json or
-# farmer_profile.json. See POLICY_AGENT_PLAN.md — "Farm Profile Fields" table.
+# Farm profile defaults
+# Fallbacks for fields that cannot be derived from farm data (insurance
+# elections, underserved designation). Everything derivable — has_crops,
+# has_livestock, land_types, country — is built per-farm by
+# `_build_farm_profile` below. See POLICY_AGENT_PLAN.md — "Farm Profile
+# Fields" table.
 # ---------------------------------------------------------------------------
 
 FARM_PROFILE = {
@@ -56,6 +63,64 @@ FARM_PROFILE = {
     "country": "US",                  # FAO/GCF gate: only non-US farms qualify
     "has_approved_lfp": False,        # ELRP gateway: auto-payment requires approved LFP
 }
+
+def _build_farm_profile(farm_config: dict) -> dict:
+    """Build this farm's profile from the farmer's own data.
+
+    Derivable facts come from the data the farmer actually entered:
+      - has_crops      — crop fields in farm_fields.json, or crops in any
+                         farm_config zone
+      - has_livestock  — pens in the livestock agent's farm_profile.json,
+                         or animals in any farm_config zone
+      - land_types     — "cropland" when the farm grows crops, "rangeland"
+                         when it runs livestock
+      - country        — farm_config location
+
+    Fields that cannot be derived (insurance elections, NAP coverage,
+    underserved designation, approved LFP, forested parcels) come from an
+    explicit "policy_profile" object in farm_config.json when the farmer
+    provided one, and otherwise fall back to the FARM_PROFILE defaults.
+    """
+    profile = dict(FARM_PROFILE)
+
+    fields = load_json(FARM_FIELDS_JSON).get("fields", [])
+    zones = farm_config.get("affected_zones", [])
+    livestock_profile = load_json(LIVESTOCK_DIR / "farm_profile.json")
+    pens = livestock_profile.get("pens", [])
+
+    profile["has_crops"] = bool(fields) or any(z.get("crops") for z in zones)
+    profile["has_livestock"] = bool(pens) or any(
+        (z.get("animals") or 0) > 0 for z in zones
+    )
+
+    country = (farm_config.get("location") or {}).get("country")
+    if country:
+        profile["country"] = country
+
+    # Explicit farmer answers win over derivation — apply before land_types,
+    # which is computed from the final has_crops / has_livestock values.
+    overrides = farm_config.get("policy_profile")
+    if isinstance(overrides, dict):
+        for key, value in overrides.items():
+            if key in profile:
+                profile[key] = value
+
+    land_types = []
+    if profile["has_crops"]:
+        land_types.append("cropland")
+    if profile["has_livestock"]:
+        land_types.append("rangeland")
+    if land_types and "land_types" not in (overrides or {}):
+        profile["land_types"] = land_types
+
+    logger.info(
+        "Farm profile: has_crops=%s has_livestock=%s land_types=%s "
+        "(explicit overrides: %s)",
+        profile["has_crops"], profile["has_livestock"], profile["land_types"],
+        sorted(overrides) if isinstance(overrides, dict) else "none",
+    )
+    return profile
+
 
 # Hardcoded loss summary — replace with real data from Crop + Livestock agents.
 # See POLICY_AGENT_PLAN.md — "Loss Summary Input" section.
@@ -457,10 +522,11 @@ def _build_catalog(
     event_date: Optional[datetime],
     deadlines_cache: dict,
     loss: dict,
+    profile: Optional[dict] = None,
 ) -> list[EligibleProgram]:
     """Evaluate every catalog program against this farm."""
     ctx = Ctx(
-        profile=FARM_PROFILE,
+        profile=profile if profile is not None else _build_farm_profile(farm_config),
         loss=loss,
         state=farm_config["location"]["state"],
         declaration=declaration,
@@ -508,6 +574,7 @@ class PolicyAgent:
         self.status_path = Path(status_path)
         self.declaration: Optional[bool] = None
         self.event_date: Optional[datetime] = None
+        self.farm_profile: dict = {}
         self.programs: list[EligibleProgram] = []
         self.report: dict = {}
 
@@ -532,12 +599,14 @@ class PolicyAgent:
 
         self.declaration = None if dry_run else _check_fema_declaration(state, county)
 
+        self.farm_profile = _build_farm_profile(self.farm_config)
         self.programs = _build_catalog(
             farm_config=self.farm_config,
             declaration=self.declaration,
             event_date=self.event_date,
             deadlines_cache=_load_deadlines_cache(),
             loss=loss,
+            profile=self.farm_profile,
         )
 
         if dry_run:
@@ -572,8 +641,10 @@ class PolicyAgent:
                 "programs_scored": tavily_enriched,
                 "programs_skipped": len(self.programs) - tavily_enriched,
             },
+            "farm_profile": self.farm_profile,
             "data_sources": {
                 "loss_summary": "hardcoded" if dry_run else "live_jsons",
+                "farm_profile": "farm_config + farm_fields + livestock farm_profile",
                 "crop_json": str(crop_path) if crop_path else None,
                 "livestock_json": str(LIVESTOCK_ERPC_MSG) if LIVESTOCK_ERPC_MSG.exists() else None,
             },

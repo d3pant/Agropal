@@ -12,7 +12,8 @@ Form structure:
   Items 1-10:  Part A header — office, producer, disaster info
   Items 11-31: Part B production/acreage (page 2, per-crop rows)
   Items 32-37: Part C inventory losses
-  Items 38-48: Part D forage/grazing losses — left blank, no livestock feed yet
+  Items 38-48: Part F grazing losses — filled from livestock data when the
+               farm runs livestock (items 46-48 are COC use only, never filled)
   Items 49-52: Part E/F certifications — FSA officer completes
   Signatures:  farmer and FSA officer sign in person
 """
@@ -56,6 +57,29 @@ PROD_ROW_KEYS = (
      "21": "item21_row_3",   "22": "item 22_line_3", "24": "item 24_line_3",
      "25": "item 25_line_3", "26": "item 26_line_3", "27": "item 27_line 3",
      "28": "item 28_row 3",  "29": "item 29_row 3"},
+)
+
+# Part F grazing rows (items 38-48). Column meanings per the form itself:
+# 38 Crop Type, 39 Producer Share, 40 Acres, 41 Practice, 42 Unseeded Land
+# (Federal/State), 43 Stage, 44 Carrying Capacity, 45 Grazing Period Days,
+# 46 AUD Adjustment Factor, 47 AUD Loss Factor, 48 AUD Assigned Production.
+# Items 46-48 are marked "COC Use Only" on the form — never filled here.
+FORAGE_ROW_KEYS = (
+    {"38": "item 38_row 1", "39": "item 39_row 1", "40": "item 40_row 1",
+     "41": "item 41_row 1", "42F": "item 42_Federal_Row 1",
+     "42S": "item 42_row 1 State", "43": "item 43_row 1", "44": "item 44_row 1",
+     "45": "Item 45_row 1", "46": "Item 46_row 1", "47": "Item 47_row 1",
+     "48": "48_row 1"},
+    {"38": "item 38_row 2", "39": "item 39_row 2", "40": "item 40_row 2",
+     "41": "item 41_row 2", "42F": "item 42_Federal_Row 2",
+     "42S": "item 42_row 2 State", "43": "item 43_row 2", "44": "item 44_row 2",
+     "45": "Item 45_row 2", "46": "Item 46_row 2", "47": "Item 47_row 2",
+     "48": "48_row 2"},
+    {"38": "item 38_row 3", "39": "item 39_row 3", "40": "item 40_row 3",
+     "41": "item 41_row 3", "42F": "item 42_Federal_Row 3",
+     "42S": "item 42_row 3 State", "43": "item 43_row 3", "44": "item 44_row 3",
+     "45": "Item 45_row 3", "46": "Item 46_row 3", "47": "Item 47_row 3",
+     "48": "48_row 3"},
 )
 
 # Part C inventory rows.
@@ -188,7 +212,35 @@ def _inventory(rows: list[dict | None]) -> dict[str, str]:
     return fields
 
 
-def build_field_map(farm_config: dict, status: dict, destructions: list) -> dict[str, str]:
+def _forage(livestock: dict | None) -> dict[str, str]:
+    """Part F, items 38-48 — grazing losses, one row for the farm's herd.
+
+    Filled only when the farm actually runs livestock. We fill what the
+    system knows — forage/grazing type from the herd's species, producer
+    share, grazing acres, practice — and leave stage, carrying capacity,
+    and grazing-period days blank: no agent measures those, so the farmer
+    completes them. Items 46-48 are COC use only and always stay blank.
+    """
+    fields: dict[str, str] = {}
+    species = (livestock or {}).get("species") or []
+    active = bool(livestock) and bool(species)
+    acres = (livestock or {}).get("grazing_acres")
+    for i, keys in enumerate(FORAGE_ROW_KEYS):
+        row_active = active and i == 0
+        fields[keys["38"]] = (
+            "Livestock Grazing (" + ", ".join(s.title() for s in species) + ")"
+            if row_active else ""
+        )
+        fields[keys["39"]] = PRODUCER_SHARE if row_active else ""
+        fields[keys["40"]] = str(acres) if (row_active and acres) else ""
+        fields[keys["41"]] = PRACTICE if row_active else ""
+        for k in ("42F", "42S", "43", "44", "45", "46", "47", "48"):
+            fields[keys[k]] = ""
+    return fields
+
+
+def build_field_map(farm_config: dict, status: dict, destructions: list,
+                    livestock: dict | None = None) -> dict[str, str]:
     """Map every CCC-576 field we can fill to a value from farm and loss data.
 
     Unfillable fields are set to empty string so the PDF renders them blank.
@@ -214,6 +266,7 @@ def build_field_map(farm_config: dict, status: dict, destructions: list) -> dict
         **_acreage(farm_id, rows, destructions),
         **_production(farm_name, event_iso, rows),
         **_inventory(rows),
+        **_forage(livestock),
     }
 
 

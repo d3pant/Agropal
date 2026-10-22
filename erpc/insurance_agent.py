@@ -5,6 +5,13 @@ Reads status.json, econ_report.json, and farm_config.json and pre-populates
 all fields we have data for. Fields requiring farmer input are left blank
 or marked with a note.
 
+All loss data comes from the Econ Agent's report: econ embeds the raw
+per-field crop_destructions and a livestock summary in econ_report.json,
+so this agent never bypasses it to read upstream agent files directly.
+In live mode, if the econ report is missing — or its crop data is not
+live crop-agent output — the agent refuses to fill the form rather than
+substituting placeholder numbers. Mock data is used only for --dry-run.
+
 The CCC-576 is the primary Notice of Loss form for ELAP, LFP, LIP, and NAP.
 It must be filed within 30 days of the loss event.
 
@@ -25,8 +32,8 @@ from pypdf import PdfReader, PdfWriter
 
 from erpc.ccc576_form import build_field_map, lookup_office
 from erpc.common import (
-    ECON_REPORT, FARM_CONFIG, FILLED_PDF, FORMS_DIR, STATUS_JSON,
-    get_logger, load_crop_output, load_json,
+    ECON_REPORT, FARM_CONFIG, FILLED_PDF, FORMS_DIR, LIVESTOCK_DIR, STATUS_JSON,
+    get_logger, load_json,
 )
 
 logger = get_logger("insurance_agent")
@@ -38,18 +45,26 @@ CCC_576_BLANK = FORMS_DIR / "ccc_576.pdf"
 # Data loading
 # ---------------------------------------------------------------------------
 
-def _load_live_crop_destructions() -> Optional[list]:
-    """crop_destructions from the latest crop agent output.
+def _load_livestock_context(econ: dict) -> Optional[dict]:
+    """Livestock context for Part F (grazing) of the form.
 
-    Returns the list (possibly empty — a legitimate "no destructions" answer)
-    or None if no crop output file exists at all.
+    Head counts come from the econ report's livestock section; species and
+    grazing acres come from the livestock agent's farm profile — the same
+    sources the rest of the system uses. Returns None when the farm has no
+    livestock at risk, in which case Part F is left blank.
     """
-    data, path = load_crop_output()
-    if path is None:
+    lv = econ.get("livestock") or {}
+    profile = load_json(LIVESTOCK_DIR / "farm_profile.json")
+    pens = profile.get("pens", [])
+    species = sorted({p.get("species") for p in pens if p.get("species")})
+    if not species and not lv.get("total_head"):
         return None
-    destructions = data["task2"].get("crop_destructions", [])
-    logger.info("Loaded %d crop_destructions from %s", len(destructions), path.name)
-    return destructions
+    return {
+        "species": species,
+        "grazing_acres": profile.get("total_acres"),
+        "total_head": lv.get("total_head"),
+        "at_risk_usd": lv.get("at_risk_usd"),
+    }
 
 
 MOCK_STATUS = {
@@ -100,6 +115,7 @@ def fill_ccc576(
     status: dict,
     econ: dict,
     output_path: Path,
+    livestock: Optional[dict] = None,
 ) -> Path:
     """Render a filled CCC-576 to `output_path` and return that path."""
     loc = farm_config.get("location", {})
@@ -109,7 +125,9 @@ def fill_ccc576(
             loc.get("county") or "?", loc.get("state") or "?",
         )
 
-    field_map = build_field_map(farm_config, status, econ.get("crop_destructions", []))
+    field_map = build_field_map(
+        farm_config, status, econ.get("crop_destructions", []), livestock=livestock
+    )
 
     writer = PdfWriter()
     writer.append(PdfReader(str(CCC_576_BLANK)))
@@ -151,29 +169,38 @@ class InsuranceAgent:
             logger.info("Dry run — using mock status and econ data")
             status, econ = dict(MOCK_STATUS), dict(MOCK_ECON)
             self.crop_source = "mock"
-            return fill_ccc576(self.farm_config, status, econ, self.output_path)
+            mock_livestock = {"species": ["cattle"], "grazing_acres": None}
+            return fill_ccc576(
+                self.farm_config, status, econ, self.output_path,
+                livestock=mock_livestock,
+            )
 
-        status = load_json(self.status_path, MOCK_STATUS)
-        econ = load_json(self.econ_path, MOCK_ECON)
+        status = load_json(self.status_path)
+        if not status:
+            logger.warning("No status at %s — disaster dates will be left blank",
+                           self.status_path.name)
 
-        # Insurance form needs per-crop destructions. Econ report has aggregate
-        # exposure, not the destruction list — pull that from the latest crop
-        # agent output (same source econ uses), and only fall back to mock if
-        # neither econ nor live crop data has anything.
-        if "crop_destructions" not in econ:
-            live = _load_live_crop_destructions()
-            if live is None:
-                # No live crop output exists — use mock so the form still renders
-                self.crop_source = "mock"
-                econ["crop_destructions"] = MOCK_ECON["crop_destructions"]
-            else:
-                # Live data exists; an empty list is a legitimate "no crops at risk"
-                self.crop_source = "live"
-                econ["crop_destructions"] = live
-        else:
-            self.crop_source = "econ_report"
+        econ = load_json(self.econ_path)
+        if not econ:
+            raise RuntimeError(
+                f"Econ report not found at {self.econ_path} — run the econ agent "
+                "first. Refusing to fill a CCC-576 with placeholder data."
+            )
+        crop_source = (econ.get("data_sources") or {}).get("crop_agent")
+        if crop_source != "live" or "crop_destructions" not in econ:
+            raise RuntimeError(
+                "Econ report has no live crop-agent data "
+                f"(crop source: {crop_source!r}) — the crop agent has not "
+                "finished yet. Refusing to fill a CCC-576 with placeholder data."
+            )
+        self.crop_source = "econ_report"
+        logger.info("Loaded %d crop_destructions from econ report",
+                    len(econ["crop_destructions"]))
 
-        return fill_ccc576(self.farm_config, status, econ, self.output_path)
+        livestock = _load_livestock_context(econ)
+        return fill_ccc576(
+            self.farm_config, status, econ, self.output_path, livestock=livestock
+        )
 
     def print_summary(self, out_path: Path) -> None:
         print(f"\n  CCC-576 filled: {out_path}")
@@ -187,9 +214,12 @@ class InsuranceAgent:
         print("    Items 7–8  — Farm number, planted acreage, disaster-affected acreage (per crop, up to 3)")
         print("    Items 11–29 — Production section: crop, acreage, producer share, salvage value (per crop)")
         print("    Items 32–37 — Inventory values before/after disaster, salvage")
+        print("    Items 38–41 — Grazing section (Part F, row 1): grazing type from herd species,")
+        print("                  producer share, grazing acres, practice — when the farm has livestock")
         print("  Fields left blank (farmer completes at FSA office):")
         print("    NAP unit numbers, actual production records, variety/type,")
-        print("    planting period, forage/grazing section (Items 38–48), signatures")
+        print("    planting period, grazing stage/carrying capacity/period days (Items 43–45), signatures")
+        print("    Items 46–48 are COC use only and always stay blank.")
 
 
 # ---------------------------------------------------------------------------

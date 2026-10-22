@@ -23,7 +23,8 @@ from pathlib import Path
 from typing import Optional
 
 from erpc.common import (
-    ECON_REPORT, FARM_CONFIG, FARM_FIELDS_JSON, LIVESTOCK_ERPC_MSG, STATUS_JSON,
+    ECON_REPORT, FARM_CONFIG, FARM_FIELDS_JSON, LIVESTOCK_ERPC_MSG,
+    LIVESTOCK_STATUS, STATUS_JSON,
     get_logger, load_crop_output, load_json, write_report,
 )
 
@@ -142,19 +143,46 @@ def _load_crop_data() -> tuple[dict, str]:
     return _build_fallback_crop_data(), "fallback"
 
 
+def _evacuated_counts(msg: dict) -> tuple[int, int]:
+    """(evacuated, total) head counts from the livestock agent's latest outputs.
+
+    Primary source is livestock_status.json, which the livestock agent
+    rewrites every cycle with animals_moved_count / animals_remaining_count —
+    so as the farmer moves animals, later econ cycles see the share rise.
+    Falls back to the ERPC message's evacuation plan (animals_can_evacuate
+    out of total_animals_at_risk) when no status file exists yet.
+    """
+    status = load_json(LIVESTOCK_STATUS)
+    moved = status.get("animals_moved_count")
+    remaining = status.get("animals_remaining_count")
+    if isinstance(moved, int) and isinstance(remaining, int) and moved + remaining > 0:
+        return moved, moved + remaining
+    opt = msg.get("cost_optimization", {})
+    total = opt.get("total_animals_at_risk", 0) or 0
+    can_move = opt.get("animals_can_evacuate", 0) or 0
+    return can_move, total
+
+
 def _load_livestock_data() -> tuple[dict, str]:
     """Load livestock agent output. Returns (data, source)."""
     msg = load_json(LIVESTOCK_ERPC_MSG)
     total = msg.get("cost_optimization", {}).get("total_animals_at_risk", 0)
     if total > 0:
+        evacuated, evac_total = _evacuated_counts(msg)
+        evacuated_pct = evacuated / evac_total if evac_total > 0 else 0.0
+        logger.info(
+            "Livestock evacuation: %d/%d head moved (%.0f%%)",
+            evacuated, evac_total, evacuated_pct * 100,
+        )
         return {
             "total_head": total,
             "value_per_head_usd": round(msg.get("animal_valuation_at_risk", 0) / total, 2),
-            "evacuated_pct": 0.0,
+            "evacuated_pct": round(evacuated_pct, 4),
+            "evacuated_head": evacuated,
             "transport_cost_usd": msg.get("transport_costs_usd", 0),
         }, "live"
     logger.warning("No livestock data at %s — using HARDCODED_LIVESTOCK", LIVESTOCK_ERPC_MSG.name)
-    return {**HARDCODED_LIVESTOCK, "transport_cost_usd": None}, "hardcoded_stub"
+    return {**HARDCODED_LIVESTOCK, "evacuated_head": 0, "transport_cost_usd": None}, "hardcoded_stub"
 
 
 # ---------------------------------------------------------------------------
@@ -495,6 +523,18 @@ class EconAgent:
             "farm_id": self.farm_config["farm_id"],
             "threat_level": threat_level,
             "financial_exposure": exposure,
+            # Raw per-field destructions, passed through for downstream agents
+            # (insurance fills CCC-576 rows from these — aggregates alone are
+            # not enough) so no agent has to bypass this report.
+            "crop_destructions": crop_data["task2"].get("crop_destructions", []),
+            "livestock": {
+                "total_head": livestock["total_head"],
+                "evacuated_head": livestock.get("evacuated_head", 0),
+                "remaining_head": livestock["total_head"] - livestock.get("evacuated_head", 0),
+                "evacuated_pct": livestock["evacuated_pct"],
+                "value_per_head_usd": livestock["value_per_head_usd"],
+                "at_risk_usd": exposure["livestock_at_risk_usd"],
+            },
             "cost_assumptions_used": COST_ASSUMPTIONS,
             "action_queue": [a.to_dict() for a in action_queue],
             "infeasible_actions": [a.to_dict() for a in infeasible_actions],
