@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional
 
 load_dotenv(Path(__file__).parent.parent / ".env")
@@ -265,27 +265,41 @@ SETUP_SENTINEL = Path(__file__).parent.parent / ".farm_setup_done"
 
 class PenInput(BaseModel):
     species: str          # cattle | horse | sheep | pig | goat
-    count: int
+    count: int = Field(gt=0)
     age: str              # adult | juvenile | mixed
     health: str           # healthy | mixed | sick
+    lat: float = Field(ge=-90, le=90)
+    lon: float = Field(ge=-180, le=180)
     name: Optional[str] = None
 
 
 class FieldInput(BaseModel):
     crop: str             # avocado | citrus | strawberries | tomatoes | wheat | ...
-    acres: float
+    acres: float = Field(gt=0)
+    lat: float = Field(ge=-90, le=90)
+    lon: float = Field(ge=-180, le=180)
     planting_date: str    # YYYY-MM-DD
 
 
+class EconomicCostInput(BaseModel):
+    harvest_labor_rate_usd_per_hour: float = Field(gt=0)
+    harvest_hours_per_acre: float = Field(gt=0)
+    firebreak_cost_usd_per_acre: float = Field(gt=0)
+    livestock_transport_cost_usd_per_head: Optional[float] = Field(default=None, gt=0)
+    transplant_seedling_value_usd_per_acre: float = Field(gt=0)
+    opportunity_cost_seasons: int = Field(ge=1)
+
+
 class SetupInput(BaseModel):
-    farm_name: str
-    lat: float
-    lon: float
-    total_acres: float
-    trailers: int = 2
-    vehicle_capacity: int = 100
+    farm_name: str = Field(min_length=1)
+    lat: float = Field(ge=-90, le=90)
+    lon: float = Field(ge=-180, le=180)
+    total_acres: float = Field(gt=0)
+    trailers: Optional[int] = Field(default=None, ge=0)
+    vehicle_capacity: Optional[int] = Field(default=None, gt=0)
     pens: List[PenInput]
-    fields: List[FieldInput]
+    fields: List[FieldInput] = Field(min_length=1)
+    economic_costs: EconomicCostInput
 
 
 @app.get("/api/setup/status")
@@ -300,9 +314,25 @@ async def run_setup(data: SetupInput):
 
     farm_id = "farm_001"
     lat, lon = data.lat, data.lon
+    if data.pens and (data.trailers is None or data.vehicle_capacity is None):
+        raise HTTPException(status_code=422, detail="Transport capacity is required when livestock is present.")
 
     # ── 1. forecaster/config/farm_config.json ──
-    deg = 0.005  # ~0.5 km offset per zone
+    farm_radius_lat = math.sqrt(data.total_acres * 4047 / math.pi) / 111000
+    farm_radius_lon = farm_radius_lat / max(math.cos(math.radians(lat)), 0.01)
+    point_lats = [lat, *(p.lat for p in data.pens), *(f.lat for f in data.fields)]
+    point_lons = [lon, *(p.lon for p in data.pens), *(f.lon for f in data.fields)]
+    south = min(min(point_lats), lat - farm_radius_lat)
+    north = max(max(point_lats), lat + farm_radius_lat)
+    west = min(min(point_lons), lon - farm_radius_lon)
+    east = max(max(point_lons), lon + farm_radius_lon)
+    split_lat = lat
+    north_ring = [[west, split_lat], [east, split_lat], [east, north], [west, north], [west, split_lat]]
+    south_ring = [[west, south], [east, south], [east, split_lat], [west, split_lat], [west, south]]
+    north_fields = [f for f in data.fields if f.lat >= split_lat]
+    south_fields = [f for f in data.fields if f.lat < split_lat]
+    north_pens = [p for p in data.pens if p.lat >= split_lat]
+    south_pens = [p for p in data.pens if p.lat < split_lat]
     farm_config = {
         "farm_id": farm_id,
         "farm_name": data.farm_name,
@@ -313,17 +343,15 @@ async def run_setup(data: SetupInput):
         "affected_zones": [
             {
                 "zone_id": "Z1", "name": "North Zone",
-                "polygon": {"type": "Polygon", "coordinates": [[[lon - deg, lat + deg], [lon + deg, lat + deg], [lon + deg, lat], [lon - deg, lat], [lon - deg, lat + deg]]]},
-                "crops": list({f.crop for f in data.fields[:len(data.fields)//2 + 1]}),
-                "animals": sum(p.count for p in data.pens[:len(data.pens)//2 + 1]),
-                "harvest_readiness": 0.6,
+                "polygon": {"type": "Polygon", "coordinates": [north_ring]},
+                "crops": list({f.crop for f in north_fields}),
+                "animals": sum(p.count for p in north_pens),
             },
             {
                 "zone_id": "Z2", "name": "South Zone",
-                "polygon": {"type": "Polygon", "coordinates": [[[lon - deg, lat], [lon + deg, lat], [lon + deg, lat - deg], [lon - deg, lat - deg], [lon - deg, lat]]]},
-                "crops": list({f.crop for f in data.fields[len(data.fields)//2:]}),
-                "animals": sum(p.count for p in data.pens[len(data.pens)//2:]),
-                "harvest_readiness": 0.4,
+                "polygon": {"type": "Polygon", "coordinates": [south_ring]},
+                "crops": list({f.crop for f in south_fields}),
+                "animals": sum(p.count for p in south_pens),
             },
         ],
     }
@@ -331,16 +359,14 @@ async def run_setup(data: SetupInput):
     with open(FARM_CONFIG_PATH, "w") as f:
         json.dump(farm_config, f, indent=2)
 
+    economic_costs_path = FORECASTER_DIR / "config" / "economic_costs.json"
+    with open(economic_costs_path, "w") as f:
+        json.dump(data.economic_costs.model_dump(), f, indent=2)
+
     # ── 2. Livestock/farm_profile.json ──
-    import math as _math
-    farm_radius_deg = _math.sqrt(data.total_acres * 4047 / _math.pi) / 111000  # degrees
-    pen_step = farm_radius_deg * 0.55  # pens spread within ~55% of radius
     pens_json = []
     for i, pen in enumerate(data.pens):
-        zone = "Z1" if i < len(data.pens) // 2 + 1 else "Z2"
-        sign = 1 if zone == "Z1" else -1
-        offset_lat = lat + sign * pen_step * (0.6 + (i % 3) * 0.15)
-        offset_lon = lon + (i % 2) * pen_step * 0.5 - pen_step * 0.25
+        zone = "Z1" if pen.lat >= split_lat else "Z2"
         pens_json.append({
             "pen_id": f"pen_{i+1:03d}",
             "zone": zone,
@@ -349,8 +375,7 @@ async def run_setup(data: SetupInput):
             "count": pen.count,
             "age_distribution": pen.age,
             "health_status": pen.health,
-            "avg_market_value_usd": {"cattle": 1450, "horse": 3500, "sheep": 350, "pig": 550, "goat": 300}.get(pen.species, 1000),
-            "centroid": {"lat": round(offset_lat, 5), "lon": round(offset_lon, 5)},
+            "centroid": {"lat": pen.lat, "lon": pen.lon},
         })
 
     farm_profile = {
@@ -360,9 +385,8 @@ async def run_setup(data: SetupInput):
         "total_acres": data.total_acres,
         "pens": pens_json,
         "infrastructure": {
-            "water_sources": 2,
-            "vehicle_capacity_head": data.vehicle_capacity,
-            "available_trailers": data.trailers,
+            "vehicle_capacity_head": data.vehicle_capacity or 0,
+            "available_trailers": data.trailers or 0,
         },
     }
     with open(LIVESTOCK_DIR_CFG / "farm_profile.json", "w") as f:
@@ -371,12 +395,10 @@ async def run_setup(data: SetupInput):
     # ── 3. crop_agent/farm_fields.json ──
     fields_json = []
     for i, field in enumerate(data.fields):
-        offset_lat = lat + (0.003 - i * 0.003)
-        offset_lon = lon + (i % 2) * 0.004 - 0.002
         fields_json.append({
             "field_id": f"F{i+1}",
             "crop_category": field.crop,
-            "location": {"lat": round(offset_lat, 5), "lon": round(offset_lon, 5)},
+            "location": {"lat": field.lat, "lon": field.lon},
             "size_acres": field.acres,
             "planting_date": field.planting_date,
         })
@@ -451,8 +473,18 @@ def _filter_econ_to_farm(data: dict) -> dict:
 @app.get("/api/econ")
 def get_econ_report():
     econ_path = FORECASTER_DIR / "output" / "econ_report.json"
-    if not econ_path.exists():
-        raise HTTPException(status_code=404, detail="No econ report yet — run forecaster first")
+    crop_outputs = list(CROP_DIR_CFG.glob("output_*.json")) + list(CROP_DIR_CFG.glob("crop_agent_output_*.json"))
+    crop_outputs = [p for p in crop_outputs if "raw" not in p.name and "erpc" not in p.name]
+    livestock_msg = LIVESTOCK_DIR_CFG / "erpc_message.json"
+    required_files = [CROP_DIR_CFG / "farm_fields.json", LIVESTOCK_DIR_CFG / "farm_profile.json",
+                      FORECASTER_DIR / "config" / "economic_costs.json"]
+    if (not SETUP_SENTINEL.exists() or not econ_path.exists() or not crop_outputs
+            or any(not p.exists() for p in required_files)
+            or not livestock_msg.exists()):
+        raise HTTPException(status_code=404, detail="Current farm and agent data are required for an econ report")
+    newest_input = max(p.stat().st_mtime for p in [*required_files, crop_outputs and max(crop_outputs, key=lambda p: p.stat().st_mtime), livestock_msg])
+    if econ_path.stat().st_mtime <= newest_input:
+        raise HTTPException(status_code=404, detail="Econ report is stale; rerun crop, livestock, and econ agents")
     with open(econ_path) as f:
         data = json.load(f)
     return JSONResponse(_filter_econ_to_farm(data))
@@ -650,13 +682,16 @@ def _run_econ_subprocess() -> Optional[dict]:
     Econ agent reads the latest crop and livestock outputs from disk."""
     import subprocess
     try:
-        subprocess.run(
+        result = subprocess.run(
             ["python3", "-m", "erpc.econ_agent"],
             cwd=Path(__file__).parent.parent,
             capture_output=True, text=True, timeout=60,
         )
-    except Exception:
-        pass  # best-effort; we still try to read whatever econ_report.json exists
+        if result.returncode != 0:
+            detail = result.stderr[-500:] if result.stderr else result.stdout[-500:] or "Econ agent failed"
+            return {"error": detail}
+    except Exception as exc:
+        return {"error": str(exc)}
     econ_path = FORECASTER_DIR / "output" / "econ_report.json"
     if econ_path.exists():
         try:
@@ -1119,8 +1154,10 @@ def _sync_forecaster_to_livestock():
 @app.get("/api/livestock/status")
 def get_livestock_status():
     """Return the latest livestock evacuation status."""
-    if not LIVESTOCK_STATUS_JSON.exists():
-        raise HTTPException(status_code=404, detail="livestock_status.json not found — run livestock agent first")
+    profile_path = LIVESTOCK_DIR / "farm_profile.json"
+    if (not SETUP_SENTINEL.exists() or not LIVESTOCK_STATUS_JSON.exists() or not profile_path.exists()
+            or LIVESTOCK_STATUS_JSON.stat().st_mtime <= profile_path.stat().st_mtime):
+        raise HTTPException(status_code=404, detail="Current livestock status is unavailable — run setup and the livestock agent")
     with open(LIVESTOCK_STATUS_JSON) as f:
         return JSONResponse(json.load(f))
 
@@ -1129,6 +1166,13 @@ def _run_livestock_subprocess() -> dict:
     """Sync forecaster data then run livestock agent.
     Returns livestock_status dict or {"error": "..."}."""
     import subprocess
+    if not SETUP_SENTINEL.exists():
+        return {"error": "Complete farmer setup before running the livestock agent."}
+    wake_up_src = FORECASTER_DIR / "output" / "wake_up_packet.json"
+    if not STATUS_JSON.exists() or STATUS_JSON.stat().st_mtime <= SETUP_SENTINEL.stat().st_mtime:
+        return {"error": "Run a fresh forecaster cycle for the current farm before livestock analysis."}
+    if not wake_up_src.exists() or wake_up_src.stat().st_mtime <= SETUP_SENTINEL.stat().st_mtime:
+        return {"error": "Current fire-arrival and smoke data are unavailable; livestock analysis was not run."}
     _sync_forecaster_to_livestock()
     with open(LIVESTOCK_DIR / "status.json") as f:
         expected_run_id = json.load(f).get("run_id")
@@ -1207,8 +1251,10 @@ def get_crop_status():
         key=lambda p: p.stat().st_mtime, reverse=True
     )
     outputs = [p for p in outputs if "raw" not in p.name and "erpc" not in p.name]
-    if not outputs:
-        raise HTTPException(status_code=404, detail="No crop agent output — run crop agent first")
+    fields_path = CROP_DIR_CFG / "farm_fields.json"
+    if (not SETUP_SENTINEL.exists() or not outputs or not fields_path.exists()
+            or outputs[0].stat().st_mtime <= fields_path.stat().st_mtime):
+        raise HTTPException(status_code=404, detail="Current crop output is unavailable — run setup and the crop agent")
     with open(outputs[0]) as f:
         data = json.load(f)
     data = _normalize_crop_output(data)
@@ -1222,22 +1268,31 @@ def get_crop_status():
 def _run_crop_subprocess() -> dict:
     """Run crop agent. Returns normalized crop output dict, or {"error": "..."}."""
     import subprocess
+    if not SETUP_SENTINEL.exists():
+        return {"error": "Complete farmer setup before running the crop agent."}
     if not STATUS_JSON.exists():
         return {"error": "status.json not found — run forecaster first"}
+    if STATUS_JSON.stat().st_mtime <= SETUP_SENTINEL.stat().st_mtime:
+        return {"error": "Run a fresh forecaster cycle for the current farm before crop analysis."}
     env = os.environ.copy()
     if not env.get("GROQ_API_KEY"):
         return {"error": "GROQ_API_KEY not set"}
     try:
+        run_started = datetime.now().timestamp()
         proc = subprocess.run(
             ["python3", "crop_agent.py", str(STATUS_JSON)],
             cwd=CROP_DIR,
             capture_output=True, text=True, timeout=180, env=env,
         )
+        if proc.returncode != 0:
+            detail = proc.stderr[-500:] if proc.stderr else proc.stdout[-500:] or "Crop agent failed"
+            return {"error": detail}
         outputs = sorted(
             list(CROP_DIR.glob("output_*.json")) + list(CROP_DIR.glob("crop_agent_output_*.json")),
             key=lambda p: p.stat().st_mtime, reverse=True
         )
         outputs = [p for p in outputs if "raw" not in p.name and "erpc" not in p.name]
+        outputs = [p for p in outputs if p.stat().st_mtime >= run_started]
         if outputs:
             with open(outputs[0]) as f:
                 data = json.load(f)

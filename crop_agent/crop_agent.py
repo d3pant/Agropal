@@ -34,7 +34,6 @@ GROQ_MODEL             = "llama-3.3-70b-versatile"
 FORECAST_STATUS_FILE   = "forecast_status.json"
 FARM_FIELDS_FILE       = "farm_fields.json"
 CROP_PROPERTIES_FILE   = "crop_properties.json"
-FARM_RESOURCES_FILE    = "farm_resources.json"
 
 # ── System prompt ─────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """\
@@ -252,6 +251,57 @@ def save_outputs(parsed: dict, raw_text: str, timestamp: str) -> None:
         print(f"Raw LLM text saved -> {fallback}")
 
 
+def apply_live_economic_data(parsed: dict, farm_fields: dict, prices_data: dict,
+                             wildfire_status: dict) -> None:
+    """Replace LLM-generated crop dollars with values derived from live inputs."""
+    normalize_crop = lambda crop: crop.strip().lower().replace(" ", "_").replace("-", "_")
+    prices = {normalize_crop(p["crop_category"]): p for p in prices_data.get("live_prices", [])}
+    fields = {f["field_id"]: f for f in farm_fields.get("fields", [])}
+    decisions = parsed.get("field_decisions") or parsed.get("task4") or []
+    decision_by_id = {row["field_id"]: row for row in decisions if row.get("field_id") in fields}
+    confidence = wildfire_status.get("threat_level_confidence")
+    if confidence is None:
+        raise ValueError("Threat confidence is missing; cannot calculate confidence-adjusted crop loss")
+
+    destructions = []
+    for field_id, decision in decision_by_id.items():
+        farm_field = fields[field_id]
+        crop = farm_field["crop_category"]
+        price = prices.get(normalize_crop(crop))
+        if price is None:
+            raise ValueError(f"Live USDA price missing for field {field_id} ({crop})")
+        acres = float(farm_field["size_acres"])
+        loss = round(float(price["price_per_acre_usd"]) * acres, 2)
+        decision["size_acres"] = acres
+        decision["price_per_acre_usd"] = price["price_per_acre_usd"]
+        decision["confidence_adjusted_value_usd"] = round(loss * float(confidence), 2)
+        if decision.get("decision") not in ("ABANDON", "PARTIAL HARVEST"):
+            continue
+        destructions.append({
+            "field_id": field_id,
+            "crop_category": crop,
+            "size_acres": acres,
+            "price_per_acre_usd": price["price_per_acre_usd"],
+            "usda_report_date": price["usda_report_date"],
+            "estimated_loss_usd": loss,
+            "confidence_adjusted_loss_usd": round(loss * float(confidence), 2),
+            "economic_impact_score": min(100, round(loss * float(confidence) / 30000)),
+            "task4_decision": decision["decision"],
+            "reason": "Calculated from USDA NASS price and farmer-entered acreage.",
+        })
+
+    economic = parsed.get("economic_impact") or parsed.get("task2")
+    if not isinstance(economic, dict):
+        raise ValueError("Crop model output is missing its economic impact section")
+    economic["price_source"] = "USDA NASS"
+    economic["price_fetched_at"] = max((p["fetched_at"] for p in prices.values()), default=None)
+    economic["crop_destructions"] = destructions
+    economic["total_estimated_loss_usd"] = round(sum(d["estimated_loss_usd"] for d in destructions), 2)
+    economic["total_confidence_adjusted_loss_usd"] = round(
+        sum(d["confidence_adjusted_loss_usd"] for d in destructions), 2
+    )
+
+
 # ── Main agent logic ──────────────────────────────────────────────────────────
 
 def run_crop_agent(wildfire_status: dict, farm_fields: dict) -> None:
@@ -293,7 +343,7 @@ def run_crop_agent(wildfire_status: dict, farm_fields: dict) -> None:
 
     # ── Load static datasets ──────────────────────────────────────────────────
     crop_properties = load_json(CROP_PROPERTIES_FILE)
-    farm_resources  = load_json(FARM_RESOURCES_FILE)
+    farm_resources  = {}
 
     # ── Build LLM input message ───────────────────────────────────────────────
     _d = json.dumps
@@ -302,7 +352,7 @@ def run_crop_agent(wildfire_status: dict, farm_fields: dict) -> None:
         f"FARM FIELDS:\n{_d(farm_fields)}\n\n"
         f"USDA PRICES:\n{_d(prices_data)}\n\n"
         f"CROP PROPERTIES:\n{_d(crop_properties)}\n\n"
-        f"FARM RESOURCES:\n{_d(farm_resources)}\n\n"
+        "FARM RESOURCES:\nNo farm resource inventory was supplied. Do not assume workers, tools, vehicles, or water capacity.\n\n"
         f"FIELD WATER:\n{_d(field_water_data)}\n\n"
         f"FIELD FLAMMABILITY:\n{_d(field_flammability)}\n\n"
         "Run Task 4 first, then Tasks 1, 2, 3 in that order."
@@ -344,6 +394,7 @@ def run_crop_agent(wildfire_status: dict, farm_fields: dict) -> None:
             econ["crop_destructions"] = [
                 r for r in econ["crop_destructions"] if r.get("field_id") in valid_ids
             ]
+        apply_live_economic_data(parsed, farm_fields, prices_data, wildfire_status)
 
     print(f"\n{'='*60}")
     print("CROP AGENT OUTPUT")
@@ -371,6 +422,8 @@ def run_crop_agent(wildfire_status: dict, farm_fields: dict) -> None:
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
+    if not (Path(__file__).parent.parent / ".farm_setup_done").exists():
+        raise RuntimeError("Complete farmer setup before running the crop agent; bundled demo field data is disabled.")
     # Allow overriding file paths via CLI args
     forecast_file   = sys.argv[1] if len(sys.argv) > 1 else FORECAST_STATUS_FILE
     farm_file       = sys.argv[2] if len(sys.argv) > 2 else FARM_FIELDS_FILE

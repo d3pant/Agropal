@@ -127,8 +127,8 @@ Runs during Stage 2. Each cycle computes total financial exposure and produces a
 |----------|---------------|--------|
 | Crop loss (confirmed) | ABANDON fields — loss locked in | `crop_agent/crop_agent_output_*.json` → `economic_impact.crop_destructions` |
 | Crop loss (recoverable) | HARVEST NOW / PARTIAL HARVEST fields — preventable with action | Same + `field_decisions.maturity_pct` |
-| Livestock at risk | `total_head × value/head × (1 − evacuated_pct)` | `Livestock/erpc_message.json` → `animal_valuation_at_risk`, `total_animals_at_risk` |
-| Opportunity cost | 1 lost season × price/acre × acres for ABANDON; partial season for PARTIAL HARVEST | `economic_impact.price_per_acre_usd` + `field_decisions.maturity_pct` |
+| Livestock at risk | Current livestock-agent valuation for animals at risk | `Livestock/erpc_message.json` → `animal_valuation_at_risk`, `total_animals_at_risk` |
+| Opportunity cost | Farmer-entered lost-season horizon × current price/acre × acres | `economic_costs.json` + crop-agent USDA NASS pricing |
 
 Loss figure used throughout: `confidence_adjusted_loss_usd` — conservative floor, not best-case.
 
@@ -143,28 +143,15 @@ ROI = confidence_adjusted_loss_avoided / estimated_action_cost
 
 | Action | Loss Avoided | Cost Basis | Time Constraint |
 |--------|-------------|-----------|-----------------|
-| HARVEST NOW | Full `confidence_adjusted_loss_usd` | Labor rate × harvest hours | Before `fire_arrival_hours` |
-| PARTIAL HARVEST | `confidence_adjusted_loss_usd × maturity_pct` | Labor rate × hours × maturity fraction | Before `fire_arrival_hours` |
-| TRANSPLANT | Seedling replacement value | Labor rate × `labor_hours_needed` | Before `time_window` |
-| WET FIREBREAK | `confidence_adjusted_loss_usd` of protected field | Firebreak cost × field acres | IMMEDIATE or SCHEDULED |
-| EVACUATE LIVESTOCK | `Livestock/erpc_message.json` at-risk value | `transport_costs_usd` from Livestock Agent | Zone time-to-impact |
+| HARVEST NOW | Full `confidence_adjusted_loss_usd` | Farmer-entered labor rate × harvest hours per acre | Before `fire_arrival_hours` |
+| PARTIAL HARVEST | `confidence_adjusted_loss_usd × maturity_pct` | Farmer-entered labor rate × harvest hours × maturity fraction | Before `fire_arrival_hours` |
+| TRANSPLANT | Farmer-entered seedling replacement value | Farmer-entered labor rate × `labor_hours_needed` | Before `time_window` |
+| WET FIREBREAK | `confidence_adjusted_loss_usd` of protected field | Farmer-entered firebreak cost × field acres | IMMEDIATE or SCHEDULED |
+| EVACUATE LIVESTOCK | Livestock agent at-risk value | Farmer-entered transport quote × head count | Zone time-to-impact |
 
 Feasibility gates (hard — action dropped if failed): `feasible_with_farm_resources = False`, insufficient time window, or field decision is ABANDON.
 
-**Hardcoded cost assumptions** (all logged in output JSON under `cost_assumptions_used`):
-
-| Constant | Value | Unit | Replace With |
-|----------|-------|------|--------------|
-| Harvest labor rate | $25 | $/hr | USDA regional farm wage data |
-| Harvest time | 4 | hrs/acre | Per-crop estimate from Crop Agent |
-| Firebreak cost | $150 | $/acre | CAL FIRE cost estimates |
-| Livestock transport | Live | $/total | From `Livestock/erpc_message.json` `transport_costs_usd` |
-| Livestock value/head | Live | $/head | From `animal_valuation_at_risk / total_animals_at_risk` |
-| Livestock head count | Live | head | From `Livestock/erpc_message.json` `total_animals_at_risk` |
-| Transplant seedling value | $800 | $/acre | Nursery price index |
-| Opportunity cost horizon | 1 | season | Agronomist input |
-
-When the crop agent hasn't run yet (threat level GREEN, or Groq unavailable), the econ agent builds a minimal fallback from `crop_agent/farm_fields.json` using the farmer's actual field IDs and crop types — no hardcoded mock fields. Stale crop outputs are filtered at the API level to strip any field_ids not in the current `farm_fields.json`.
+Setup collects livestock counts and crop field details directly from the farmer, fetches market references from USDA NASS, and requires current farmer cost inputs. Missing or stale agent outputs stop economic reporting; bundled demo farm files are disabled in the runtime path.
 
 ---
 
@@ -249,7 +236,7 @@ Three-step onboarding wizard:
 2. Pen inventory — species, head count, age class, health status, notes per pen
 3. Field inventory — crop type, acres, planting date per field
 
-Posts to `POST /api/setup` which writes `farm_config.json`, `farm_profile.json`, `farm_fields.json` and touches `.farm_setup_done`. All agents read the farm lat/lon from `farm_config.json` at runtime — no hardcoded coordinates anywhere in the codebase.
+Posts to `POST /api/setup` which writes `farm_config.json`, `farm_profile.json`, `farm_fields.json`, current `economic_costs.json`, and touches `.farm_setup_done`. All agents read the farm lat/lon from `farm_config.json` at runtime.
 
 ---
 
@@ -407,7 +394,7 @@ report_subprocess(lang="en")             ← combined briefing PDF
 returns {forecaster, crop, livestock, econ, insurance, report, data_sources}
 ```
 
-Total wall time ~60-180s depending on Groq latency and OSRM routing. Each subprocess is independent and graceful on failure — if Groq rate-limits, crop returns `{"error": …}`, econ builds a minimal fallback from `farm_fields.json` (no hardcoded mock data), the rest of the pipeline keeps going.
+Total wall time ~60-180s depending on Groq latency and OSRM routing. If a required live data source is unavailable, the affected agent returns an error and does not reuse an older report.
 
 **Crop output filename quirk:** the crop agent writes `crop_agent/output_<timestamp>.json` (not `crop_agent_output_*.json`). The econ agent's loader globs both patterns; the on-disk path is what's actually used.
 
@@ -500,7 +487,6 @@ python forecaster.py --use-real-data              # live NASA FIRMS + Open-Meteo
 
 # Econ agent
 python -m erpc.econ_agent            # reads live crop + livestock output
-python -m erpc.econ_agent --dry-run  # mock data
 
 # Policy agent
 python -m erpc.policy_agent          # live FEMA + Grants.gov + Tavily

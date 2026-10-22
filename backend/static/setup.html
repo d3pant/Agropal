@@ -211,8 +211,13 @@
 <script>
 const state = {
   step: 1,
-  farm_name: "", lat: null, lon: null, total_acres: 100,
-  trailers: 2, vehicle_capacity: 100,
+  farm_name: "", lat: null, lon: null, total_acres: null,
+  trailers: null, vehicle_capacity: null,
+  economic_costs: {
+    harvest_labor_rate_usd_per_hour: null, harvest_hours_per_acre: null,
+    firebreak_cost_usd_per_acre: null, livestock_transport_cost_usd_per_head: null,
+    transplant_seedling_value_usd_per_acre: null, opportunity_cost_seasons: null,
+  },
   pens: [], fields: [],
 };
 
@@ -269,7 +274,7 @@ function step1Html() {
 
     <div class="field-group">
       <label>Total Farm Size (acres)</label>
-      <input type="number" id="f-acres" min="1" value="${state.total_acres}" oninput="state.total_acres=parseFloat(this.value)||1" />
+      <input type="number" id="f-acres" min="1" value="${state.total_acres ?? ''}" oninput="state.total_acres=parseFloat(this.value)||null" />
     </div>
 
     <div id="location-map"></div>
@@ -348,14 +353,17 @@ function updateLatLon() {
 }
 
 function goNext1() {
-  state.farm_name = document.getElementById("f-name").value.trim() || "My Farm";
-  state.total_acres = parseFloat(document.getElementById("f-acres").value) || 100;
+  state.farm_name = document.getElementById("f-name").value.trim();
+  state.total_acres = parseFloat(document.getElementById("f-acres").value);
+  if (!state.farm_name || !state.total_acres || state.total_acres <= 0) {
+    alert("Enter your farm name and current acreage.");
+    return;
+  }
   if (state.lat == null || state.lon == null) {
     alert("Please click on the map to pin your farm location before continuing.");
     return;
   }
   state.step = 2;
-  if (state.pens.length === 0) state.pens.push({ species:"cattle", count:50, age:"adult", health:"healthy", name:"" });
   render();
 }
 
@@ -373,11 +381,11 @@ function step2Html() {
       <div class="row-2">
         <div class="field-group">
           <label>Available Trailers</label>
-          <input type="number" id="f-trailers" min="0" value="${state.trailers}" oninput="state.trailers=parseInt(this.value)||0" />
+          <input type="number" id="f-trailers" min="0" value="${state.trailers ?? ''}" oninput="state.trailers=parseInt(this.value)||null" />
         </div>
         <div class="field-group">
           <label>Vehicle Capacity (head)</label>
-          <input type="number" id="f-vcap" min="1" value="${state.vehicle_capacity}" oninput="state.vehicle_capacity=parseInt(this.value)||50" />
+          <input type="number" id="f-vcap" min="1" value="${state.vehicle_capacity ?? ''}" oninput="state.vehicle_capacity=parseInt(this.value)||null" />
         </div>
       </div>
     </div>
@@ -389,7 +397,7 @@ function step2Html() {
 }
 
 function penCardHtml(p, i) {
-  const specOpts = SPECIES.map(s => `<option value="${s}" ${s===p.species?"selected":""}>${SPECIES_EMOJI[s]} ${s}</option>`).join("");
+  const specOpts = `<option value="">Select species</option>` + SPECIES.map(s => `<option value="${s}" ${s===p.species?"selected":""}>${SPECIES_EMOJI[s]} ${s}</option>`).join("");
   return `<div class="item-card" id="pen-card-${i}">
     <button class="remove-btn" onclick="removePen(${i})">✕</button>
     <h4>Pen ${i+1}</h4>
@@ -400,11 +408,12 @@ function penCardHtml(p, i) {
       </div>
       <div class="field-group" style="margin:0">
         <label>Count</label>
-        <input type="number" min="1" value="${p.count}" oninput="updatePen(${i},'count',parseInt(this.value)||1)" />
+        <input type="number" min="1" value="${p.count ?? ''}" oninput="updatePen(${i},'count',parseInt(this.value)||null)" />
       </div>
       <div class="field-group" style="margin:0">
         <label>Age</label>
         <select onchange="updatePen(${i},'age',this.value)">
+          <option value="">Select age mix</option>
           ${["adult","juvenile","mixed"].map(a=>`<option value="${a}" ${a===p.age?"selected":""}>${a}</option>`).join("")}
         </select>
       </div>
@@ -412,27 +421,37 @@ function penCardHtml(p, i) {
     <div class="field-group" style="margin-top:12px;margin-bottom:0">
       <label>Health Status</label>
       <select onchange="updatePen(${i},'health',this.value)">
+        <option value="">Select health status</option>
         ${["healthy","mixed","sick"].map(h=>`<option value="${h}" ${h===p.health?"selected":""}>${h}</option>`).join("")}
       </select>
+    </div>
+    <div class="row-2" style="margin-top:12px">
+      <div class="field-group" style="margin:0"><label>Pen Latitude</label><input type="number" step="any" value="${p.lat ?? ''}" oninput="setLocation(state.pens[${i}],'lat',this.value)" /></div>
+      <div class="field-group" style="margin:0"><label>Pen Longitude</label><input type="number" step="any" value="${p.lon ?? ''}" oninput="setLocation(state.pens[${i}],'lon',this.value)" /></div>
     </div>
   </div>`;
 }
 
 function updatePen(i, key, val) { state.pens[i][key] = val; }
+function setLocation(item, key, value) { item[key] = value === "" ? null : Number(value); }
 function addPen() {
-  state.pens.push({ species:"cattle", count:20, age:"adult", health:"healthy", name:"" });
+  state.pens.push({ species:"", count:null, age:"", health:"", lat:null, lon:null, name:"" });
   document.getElementById("pen-list").innerHTML = state.pens.map((p,i) => penCardHtml(p,i)).join("");
 }
 function removePen(i) {
-  if (state.pens.length <= 1) return;
   state.pens.splice(i, 1);
   document.getElementById("pen-list").innerHTML = state.pens.map((p,i) => penCardHtml(p,i)).join("");
 }
 function goNext2() {
-  state.trailers = parseInt(document.getElementById("f-trailers").value) || 2;
-  state.vehicle_capacity = parseInt(document.getElementById("f-vcap").value) || 100;
+  state.trailers = parseInt(document.getElementById("f-trailers").value);
+  state.vehicle_capacity = parseInt(document.getElementById("f-vcap").value);
+  const hasPens = state.pens.length > 0;
+  if ((hasPens && (!Number.isFinite(state.trailers) || !Number.isFinite(state.vehicle_capacity) || state.trailers < 0 || state.vehicle_capacity <= 0)) ||
+      state.pens.some(p => !p.species || !p.count || !p.age || !p.health || !Number.isFinite(p.lat) || !Number.isFinite(p.lon))) {
+    alert("Enter current livestock counts, pen locations, and transport capacity, or remove empty pen rows.");
+    return;
+  }
   state.step = 3;
-  if (state.fields.length === 0) state.fields.push({ crop:"avocado", acres:20, planting_date:"2023-01-01" });
   render();
 }
 
@@ -446,6 +465,17 @@ function step3Html() {
     <div class="item-list" id="field-list">${items}</div>
     <button class="add-btn" onclick="addField()">+ Add Another Field</button>
 
+    <h3 style="margin-top:24px">Current Operating Costs</h3>
+    <p class="sub">Enter current farm rates or quotes. These are used to calculate action costs and ROI.</p>
+    <div class="row-2">
+      <div class="field-group"><label>Harvest Labor ($/hour)</label><input type="number" min="0.01" step="0.01" value="${state.economic_costs.harvest_labor_rate_usd_per_hour ?? ''}" oninput="setEconomicCost('harvest_labor_rate_usd_per_hour',this.value)" /></div>
+      <div class="field-group"><label>Harvest Labor (hours/acre)</label><input type="number" min="0.01" step="0.01" value="${state.economic_costs.harvest_hours_per_acre ?? ''}" oninput="setEconomicCost('harvest_hours_per_acre',this.value)" /></div>
+      <div class="field-group"><label>Firebreak Quote ($/acre)</label><input type="number" min="0.01" step="0.01" value="${state.economic_costs.firebreak_cost_usd_per_acre ?? ''}" oninput="setEconomicCost('firebreak_cost_usd_per_acre',this.value)" /></div>
+      <div class="field-group"><label>Livestock Transport Quote ($/head)</label><input type="number" min="0.01" step="0.01" value="${state.economic_costs.livestock_transport_cost_usd_per_head ?? ''}" oninput="setEconomicCost('livestock_transport_cost_usd_per_head',this.value)" /></div>
+      <div class="field-group"><label>Transplant Seedling Value ($/acre)</label><input type="number" min="0.01" step="0.01" value="${state.economic_costs.transplant_seedling_value_usd_per_acre ?? ''}" oninput="setEconomicCost('transplant_seedling_value_usd_per_acre',this.value)" /></div>
+      <div class="field-group"><label>Lost Growing Seasons</label><input type="number" min="1" step="1" value="${state.economic_costs.opportunity_cost_seasons ?? ''}" oninput="setEconomicCost('opportunity_cost_seasons',this.value)" /></div>
+    </div>
+
     <div class="nav">
       <button class="btn-back" onclick="goBack()">← Back</button>
       <button class="btn-next" onclick="goNext3()">Review →</button>
@@ -453,7 +483,7 @@ function step3Html() {
 }
 
 function fieldCardHtml(f, i) {
-  const cropOpts = CROPS.map(c => `<option value="${c}" ${c===f.crop?"selected":""}>${CROP_EMOJI[c]||"🌿"} ${c}</option>`).join("");
+  const cropOpts = `<option value="">Select crop</option>` + CROPS.map(c => `<option value="${c}" ${c===f.crop?"selected":""}>${CROP_EMOJI[c]||"🌿"} ${c}</option>`).join("");
   return `<div class="item-card" id="field-card-${i}">
     <button class="remove-btn" onclick="removeField(${i})">✕</button>
     <h4>Field ${i+1}</h4>
@@ -464,27 +494,45 @@ function fieldCardHtml(f, i) {
       </div>
       <div class="field-group" style="margin:0">
         <label>Size (acres)</label>
-        <input type="number" min="0.1" step="0.1" value="${f.acres}" oninput="updateField(${i},'acres',parseFloat(this.value)||1)" />
+        <input type="number" min="0.1" step="0.1" value="${f.acres ?? ''}" oninput="updateField(${i},'acres',parseFloat(this.value)||null)" />
       </div>
       <div class="field-group" style="margin:0">
         <label>Planting Date</label>
         <input type="date" value="${f.planting_date}" onchange="updateField(${i},'planting_date',this.value)" />
       </div>
     </div>
+    <div class="row-2" style="margin-top:12px">
+      <div class="field-group" style="margin:0"><label>Field Latitude</label><input type="number" step="any" value="${f.lat ?? ''}" oninput="setLocation(state.fields[${i}],'lat',this.value)" /></div>
+      <div class="field-group" style="margin:0"><label>Field Longitude</label><input type="number" step="any" value="${f.lon ?? ''}" oninput="setLocation(state.fields[${i}],'lon',this.value)" /></div>
+    </div>
   </div>`;
 }
 
 function updateField(i, key, val) { state.fields[i][key] = val; }
 function addField() {
-  state.fields.push({ crop:"tomatoes", acres:10, planting_date: new Date().toISOString().slice(0,10) });
+  state.fields.push({ crop:"", acres:null, planting_date:"", lat:null, lon:null });
   document.getElementById("field-list").innerHTML = state.fields.map((f,i) => fieldCardHtml(f,i)).join("");
 }
 function removeField(i) {
-  if (state.fields.length <= 1) return;
   state.fields.splice(i, 1);
   document.getElementById("field-list").innerHTML = state.fields.map((f,i) => fieldCardHtml(f,i)).join("");
 }
-function goNext3() { state.step = 4; render(); }
+function goNext3() {
+  const { livestock_transport_cost_usd_per_head: transportCost, ...otherCosts } = state.economic_costs;
+  const costs = Object.values(otherCosts).map(Number);
+  if (!state.fields.length || state.fields.some(f => !f.crop || !f.acres || !f.planting_date || !Number.isFinite(f.lat) || !Number.isFinite(f.lon)) ||
+      costs.some(v => !Number.isFinite(v) || v <= 0) ||
+      (state.pens.length > 0 && (!Number.isFinite(Number(transportCost)) || Number(transportCost) <= 0)) ||
+      !Number.isInteger(Number(state.economic_costs.opportunity_cost_seasons))) {
+    alert("Complete each crop field location and enter current operating costs.");
+    return;
+  }
+  state.step = 4; render();
+}
+
+function setEconomicCost(key, value) {
+  state.economic_costs[key] = value === "" ? null : Number(value);
+}
 
 // ── Step 4: Confirm ───────────────────────────────────────────────────────────
 function step4Html() {
@@ -549,8 +597,9 @@ async function submitSetup() {
     total_acres: state.total_acres,
     trailers: state.trailers,
     vehicle_capacity: state.vehicle_capacity,
-    pens: state.pens.map(p => ({ species: p.species, count: p.count, age: p.age, health: p.health, name: p.name || "" })),
-    fields: state.fields.map(f => ({ crop: f.crop, acres: f.acres, planting_date: f.planting_date })),
+    economic_costs: state.economic_costs,
+    pens: state.pens.map(p => ({ species: p.species, count: p.count, age: p.age, health: p.health, lat: p.lat, lon: p.lon, name: p.name || "" })),
+    fields: state.fields.map(f => ({ crop: f.crop, acres: f.acres, planting_date: f.planting_date, lat: f.lat, lon: f.lon })),
   };
 
   try {
