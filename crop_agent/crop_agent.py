@@ -15,7 +15,7 @@ import json
 import os
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -231,8 +231,23 @@ def parse_llm_json(text: str) -> dict | None:
     return None
 
 
-def save_outputs(parsed: dict, raw_text: str, timestamp: str) -> None:
+def add_source_metadata(parsed: dict, farm_fields: dict, wildfire_status: dict,
+                       generated_at: str | None = None) -> dict:
+    """Attach the farm and exact forecaster run without changing agent task payloads."""
+    result = dict(parsed)
+    result["_meta"] = {
+        "farm_id": farm_fields.get("farm_id"),
+        "run_id": wildfire_status.get("run_id"),
+        "generated_at": generated_at or datetime.now(timezone.utc).isoformat(),
+    }
+    return result
+
+
+def save_outputs(parsed: dict, raw_text: str, timestamp: str,
+                 farm_fields: dict | None = None, wildfire_status: dict | None = None) -> None:
     """Save full agent JSON output and the ERPC economic slice."""
+    if farm_fields is not None and wildfire_status is not None:
+        parsed = add_source_metadata(parsed, farm_fields, wildfire_status)
     out_file = f"output_{timestamp}.json"
     with open(out_file, "w") as f:
         json.dump(parsed, f, indent=2)
@@ -360,7 +375,7 @@ def run_crop_agent(wildfire_status: dict, farm_fields: dict) -> None:
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     if parsed:
-        save_outputs(parsed, raw, ts)
+        save_outputs(parsed, raw, ts, farm_fields, wildfire_status)
     else:
         fallback = f"output_{ts}_raw.json"
         with open(fallback, "w") as f:

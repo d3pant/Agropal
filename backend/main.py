@@ -22,10 +22,12 @@ from typing import List, Optional
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
-# Allow importing from forecaster/
-sys.path.insert(0, str(Path(__file__).parent.parent / "forecaster"))
-from data_sources.open_meteo import fetch_weather
-from models.spread_model import compute_ellipse, ellipse_to_geojson_polygon, time_to_impact
+# Allow package imports when launched as `python backend/main.py` without shadowing `forecaster`.
+REPO_DIR = Path(__file__).parent.parent
+if str(REPO_DIR) not in sys.path:
+    sys.path.insert(0, str(REPO_DIR))
+from forecaster.data_sources.open_meteo import fetch_weather
+from forecaster.models.spread_model import compute_ellipse, ellipse_to_geojson_polygon, time_to_impact
 
 app = FastAPI(title="California Wildfire Map")
 _PIPELINE_LOCK = asyncio.Lock()
@@ -269,6 +271,7 @@ class PenInput(BaseModel):
     age: str              # adult | juvenile | mixed
     health: str           # healthy | mixed | sick
     name: Optional[str] = None
+    splittable: bool = False  # operator confirms animals can be loaded in separate batches
 
 
 class FieldInput(BaseModel):
@@ -349,6 +352,7 @@ async def run_setup(data: SetupInput):
             "count": pen.count,
             "age_distribution": pen.age,
             "health_status": pen.health,
+            "splittable": pen.splittable,
             "avg_market_value_usd": {"cattle": 1450, "horse": 3500, "sheep": 350, "pig": 550, "goat": 300}.get(pen.species, 1000),
             "centroid": {"lat": round(offset_lat, 5), "lon": round(offset_lon, 5)},
         })
@@ -534,7 +538,7 @@ async def _run_forecaster_cycle(
         }
 
     # 3. Gate condition with real data
-    from forecaster import evaluate_gate_condition
+    from forecaster.forecaster import evaluate_gate_condition
     ndvi = -0.5  # Open-Meteo doesn't provide NDVI; neutral default
     gate = evaluate_gate_condition(
         fwi=fwi,
@@ -584,7 +588,7 @@ async def _run_forecaster_cycle(
             frp_mw=frp,
         )
 
-        from models.spread_model import head_rate_of_spread
+        from forecaster.models.spread_model import head_rate_of_spread
         spread_prediction = {
             "model": "Rothermel (1972) simplified + Anderson (1983) ellipse",
             "computed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -1096,10 +1100,7 @@ def _sync_forecaster_to_livestock():
         farm_profile = json.load(f)
     with open(FORECASTER_DIR / "config" / "farm_config.json") as f:
         farm_config = json.load(f)
-    import sys
-    if str(FORECASTER_DIR) not in sys.path:
-        sys.path.insert(0, str(FORECASTER_DIR))
-    from livestock_packet import build_livestock_packet
+    from forecaster.livestock_packet import build_livestock_packet
 
     run_id = status.get("run_id")
     if not run_id:
@@ -1289,15 +1290,16 @@ async def run_pipeline(
 async def _run_pipeline_cycle(lat: float | None, lon: float | None):
     forecaster_status = await _run_forecaster_cycle(lat, lon)
 
-    crop_result, livestock_result = await asyncio.gather(
-        asyncio.to_thread(_run_crop_subprocess),
-        asyncio.to_thread(_run_livestock_subprocess),
-        return_exceptions=True,
-    )
-    if isinstance(crop_result, BaseException):
-        crop_result = {"error": str(crop_result)}
-    if isinstance(livestock_result, BaseException):
-        livestock_result = {"error": str(livestock_result)}
+    # Livestock consumes crop field decisions from this exact forecast run.
+    # Keep these dependent agents ordered so it cannot read the prior run's crop file.
+    try:
+        crop_result = await asyncio.to_thread(_run_crop_subprocess)
+    except Exception as exc:
+        crop_result = {"error": str(exc)}
+    try:
+        livestock_result = await asyncio.to_thread(_run_livestock_subprocess)
+    except Exception as exc:
+        livestock_result = {"error": str(exc)}
 
     econ_result = _run_econ_subprocess()
     policy_result = _run_policy_subprocess()

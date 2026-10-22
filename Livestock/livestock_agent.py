@@ -10,6 +10,10 @@ from typing import Optional, Dict, List, Any
 
 import httpx
 from dotenv import load_dotenv
+try:
+    from .transport_scheduler import normalize_crop_tasks, schedule_evacuation_trips
+except ImportError:  # direct execution from the Livestock directory
+    from transport_scheduler import normalize_crop_tasks, schedule_evacuation_trips
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
@@ -444,17 +448,86 @@ def fire_eta_margin() -> float:
 
 
 def loading_delay_minutes() -> float:
-    """Configured loading duration; zero is the explicit default assumption."""
+    """Configured livestock loading duration, defaulting to a 30-minute estimate."""
     try:
-        value = float(os.getenv("LIVESTOCK_LOADING_MINUTES", "0"))
-        return value if math.isfinite(value) and value >= 0 else 0.0
+        value = float(os.getenv("LIVESTOCK_LOADING_MINUTES", "30"))
+        return value if math.isfinite(value) and value >= 0 else 30.0
     except (TypeError, ValueError):
-        return 0.0
+        return 30.0
+
+
+def unloading_delay_minutes() -> float:
+    """Configured shelter unloading duration, defaulting to a 30-minute estimate."""
+    try:
+        value = float(os.getenv("LIVESTOCK_UNLOADING_MINUTES", "30"))
+        return value if math.isfinite(value) and value >= 0 else 30.0
+    except (TypeError, ValueError):
+        return 30.0
 
 
 def smoke_forecast_window_end(departure: datetime, max_route_hours: float,
                               loading_minutes: float) -> datetime:
     return departure + timedelta(hours=max_route_hours, minutes=loading_minutes)
+
+
+async def explain_multitrip_value_locally(
+    schedule: Dict[str, Any], crop_tasks: List[Dict[str, Any]], client: Any = None
+) -> Optional[str]:
+    """Optionally ask a configured local Ollama model for display-only rationale."""
+    base_url = os.getenv("OLLAMA_BASE_URL", "").strip().rstrip("/")
+    model = os.getenv("OLLAMA_MODEL", "").strip()
+    if not base_url or not model:
+        return None
+    prompt_data = {
+        "trip_summary": schedule.get("summary", {}),
+        "trips": [{key: trip.get(key) for key in (
+            "vehicle_id", "pen_id", "animal_count", "destination", "depart_at", "arrive_at",
+            "round_trip_possible", "deadline_margin_minutes",
+        )} for trip in schedule.get("trips", [])],
+        "unscheduled_by_pen": schedule.get("unscheduled_by_pen", {}),
+        "crop_tasks": crop_tasks,
+    }
+    prompt = (
+        "Assess whether the additional scheduled trip(s) appear worthwhile in at most 120 words. "
+        "Use only supplied animal counts, vehicle-hours, deadlines, and crop facts. State 'unclear' "
+        "when costs, crop duration, or resource overlap are unknown. Do not infer shared staff/equipment, "
+        "change trip assignments, infer route safety, or claim work or movement occurred.\n\n"
+        + json.dumps(prompt_data, separators=(",", ":"))
+    )
+    try:
+        if client is not None:
+            response = await client.post(
+                f"{base_url}/api/generate", json={"model": model, "prompt": prompt, "stream": False}, timeout=15.0
+            )
+            response.raise_for_status()
+            body = response.json()
+        else:
+            async with httpx.AsyncClient(timeout=15.0) as local_client:
+                response = await local_client.post(
+                    f"{base_url}/api/generate", json={"model": model, "prompt": prompt, "stream": False}
+                )
+                response.raise_for_status()
+                body = response.json()
+        text = body.get("response") if isinstance(body, dict) else None
+        return text.strip()[:1200] if isinstance(text, str) and text.strip() else None
+    except Exception as exc:
+        logger.info("Local schedule explanation unavailable: %s", exc)
+        return None
+
+
+def load_latest_crop_output(crop_dir: Path) -> Dict[str, Any]:
+    """Load the newest full crop result, ignoring ERPC and raw-response artifacts."""
+    outputs = [path for path in crop_dir.glob("output_*.json")
+               if path.name != "output_to_erpc.json" and "raw" not in path.name]
+    for path in sorted(outputs, key=lambda item: item.stat().st_mtime, reverse=True):
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Could not read crop result %s: %s", path.name, exc)
+            continue
+        if isinstance(data, dict):
+            return data
+    return {}
 
 
 def reserve_site_capacity(remaining_by_site: Dict[tuple, int], site: Dict[str, Any],
@@ -471,30 +544,63 @@ async def compute_routes_for_pen(
     client: httpx.AsyncClient,
     pen: Dict[str, Any],
     sites: List[Dict[str, Any]],
-    pen_routes: Dict[str, List[Dict]]
+    pen_routes: Dict[str, List[Dict]],
+    farm_centroid: Dict[str, float],
 ) -> None:
     pen_id = pen["pen_id"]
     pen_lat, pen_lon = pen["centroid"]["lat"], pen["centroid"]["lon"]
+    approach_result = await query_osrm(
+        client, farm_centroid["lat"], farm_centroid["lon"], pen_lat, pen_lon
+    )
 
     results = await asyncio.gather(
-        *[query_osrm(client, pen_lat, pen_lon, site["lat"], site["lon"]) for site in sites],
+        *[
+            asyncio.gather(
+                query_osrm(client, pen_lat, pen_lon, site["lat"], site["lon"]),
+                query_osrm(client, site["lat"], site["lon"], farm_centroid["lat"], farm_centroid["lon"]),
+            ) for site in sites
+        ],
         return_exceptions=True
     )
     routes = []
     for site, result in zip(sites, results):
         if result and not isinstance(result, Exception):
-            for candidate in [result, *result.get("alternatives", [])]:
-                routes.append({
-                    "site": site,
-                    "duration_hours": candidate["duration_hours"],
-                    "distance_km": candidate["distance_km"],
-                    "source": result["source"],
-                    "route_id": candidate.get("route_id"),
-                    "geometry": candidate.get("geometry"),
-                    "segment_durations_seconds": candidate.get("segment_durations_seconds"),
-                    "segment_distances_meters": candidate.get("segment_distances_meters"),
-                    "quality": candidate.get("quality", "partial"),
-                })
+            outbound_result, return_result = result
+            outbound_candidates = [outbound_result, *(outbound_result.get("alternatives", []) if outbound_result else [])]
+            approach_candidates = [approach_result, *(approach_result.get("alternatives", []) if approach_result else [])]
+            return_candidates = [return_result, *(return_result.get("alternatives", []) if return_result else [])]
+            for candidate in outbound_candidates:
+                if not candidate:
+                    continue
+                for approach in approach_candidates:
+                    for return_route in return_candidates:
+                        approach = approach or {}
+                        return_route = return_route or {}
+                        routes.append({
+                            "site": site,
+                            "duration_hours": candidate["duration_hours"],
+                            "distance_km": candidate["distance_km"],
+                            "source": candidate.get("source", outbound_result.get("source") if outbound_result else None),
+                            "route_id": candidate.get("route_id"),
+                            "geometry": candidate.get("geometry"),
+                            "segment_durations_seconds": candidate.get("segment_durations_seconds"),
+                            "segment_distances_meters": candidate.get("segment_distances_meters"),
+                            "quality": candidate.get("quality", "partial"),
+                            "approach_duration_hours": approach.get("duration_hours"),
+                            "approach_distance_km": approach.get("distance_km"),
+                            "approach_source": approach.get("source", approach_result.get("source") if approach_result else None),
+                            "approach_route_id": approach.get("route_id"),
+                            "approach_geometry": approach.get("geometry"),
+                            "approach_segment_durations_seconds": approach.get("segment_durations_seconds"),
+                            "approach_segment_distances_meters": approach.get("segment_distances_meters"),
+                            "return_duration_hours": return_route.get("duration_hours"),
+                            "return_distance_km": return_route.get("distance_km"),
+                            "return_source": return_route.get("source", return_result.get("source") if return_result else None),
+                            "return_route_id": return_route.get("route_id"),
+                            "return_geometry": return_route.get("geometry"),
+                            "return_segment_durations_seconds": return_route.get("segment_durations_seconds"),
+                            "return_segment_distances_meters": return_route.get("segment_distances_meters"),
+                        })
     pen_routes[pen_id] = routes
 
 
@@ -627,12 +733,19 @@ async def main():
 
         pen_routes: Dict[str, List[Dict]] = {}
         await asyncio.gather(
-            *[compute_routes_for_pen(client, pen, evac_sites, pen_routes) for pen in farm["pens"]]
+            *[compute_routes_for_pen(client, pen, evac_sites, pen_routes, farm_centroid) for pen in farm["pens"]]
         )
 
         from data_sources.smoke import fetch_smoke_forecast
         all_routes = [route for routes in pen_routes.values() for route in routes]
-        coordinates = [coord for route in all_routes for coord in (route.get("geometry") or {}).get("coordinates", [])]
+        route_geometries = [
+            route.get(key) for route in all_routes
+            for key in ("approach_geometry", "geometry", "return_geometry") if route.get(key)
+        ]
+        coordinates = [coord for geometry in route_geometries for coord in geometry.get("coordinates", [])]
+        departure = datetime.now(timezone.utc)
+        loading_minutes = loading_delay_minutes()
+        unloading_minutes = unloading_delay_minutes()
         if coordinates:
             route_bounds = {
                 "min_lon": max(-125, min(point[0] for point in coordinates) - 0.1),
@@ -640,16 +753,25 @@ async def main():
                 "min_lat": max(24, min(point[1] for point in coordinates) - 0.1),
                 "max_lat": min(50, max(point[1] for point in coordinates) + 0.1),
             }
-            departure = datetime.now(timezone.utc)
-            max_duration = max((r["duration_hours"] for r in all_routes), default=0.0)
-            loading_minutes = loading_delay_minutes()
+            max_cycle_hours = max((
+                float(route.get("approach_duration_hours") or 0)
+                + float(route.get("duration_hours") or 0)
+                + float(route.get("return_duration_hours") or 0)
+                + (loading_minutes + unloading_minutes) / 60
+                for route in all_routes
+            ), default=0.0)
+            # Conservatively allow every possible load to run sequentially on one
+            # vehicle; this avoids leaving later trips outside fetched smoke data.
+            schedule_horizon_hours = max_cycle_hours * max(1, len(farm.get("pens", [])))
+            known_etas = [float(item["time_to_impact_hours"]) for item in wake_up.get("affected_zones", [])
+                          if item.get("time_to_impact_hours") is not None]
+            if known_etas:
+                schedule_horizon_hours = min(schedule_horizon_hours, max(known_etas) * fire_eta_margin())
             smoke_forecast = await asyncio.to_thread(
                 fetch_smoke_forecast, route_bounds, departure,
-                smoke_forecast_window_end(departure, max_duration, loading_minutes),
+                smoke_forecast_window_end(departure, schedule_horizon_hours, 0),
             )
         else:
-            departure = datetime.now(timezone.utc)
-            loading_minutes = loading_delay_minutes()
             smoke_forecast = {"status": "unavailable", "reason": "no verified route geometries", "source": "NOAA HRRR"}
         from smoke_exposure import assess_fire_hazard, assess_route, rank_routes
         spread_horizons = wake_up.get("spread_prediction", {}).get("horizons", {})
@@ -658,10 +780,32 @@ async def main():
         pen_counts = {p["pen_id"]: p.get("count", 0) for p in farm.get("pens", [])}
         for pen_id, routes in pen_routes.items():
             for route in routes:
-                route["smoke_assessment"] = assess_route(route, smoke_forecast, departure, loading_minutes)
-                route["fire_hazard"] = assess_fire_hazard(route, spread_horizons, fire_present, loading_minutes)
+                route["approach_smoke_assessment"] = assess_route(
+                    {"duration_hours": route.get("approach_duration_hours"), "geometry": route.get("approach_geometry"),
+                     "segment_durations_seconds": route.get("approach_segment_durations_seconds")},
+                    smoke_forecast, departure,
+                )
+                route["approach_fire_hazard"] = assess_fire_hazard(
+                    {"duration_hours": route.get("approach_duration_hours"), "geometry": route.get("approach_geometry"),
+                     "segment_durations_seconds": route.get("approach_segment_durations_seconds")},
+                    spread_horizons, fire_present,
+                )
+                approach_delay = float(route.get("approach_duration_hours") or 0) * 60 + loading_minutes
+                route["smoke_assessment"] = assess_route(route, smoke_forecast, departure, approach_delay)
+                route["fire_hazard"] = assess_fire_hazard(route, spread_horizons, fire_present, approach_delay)
+                return_leg = {
+                    "duration_hours": route.get("return_duration_hours"), "geometry": route.get("return_geometry"),
+                    "segment_durations_seconds": route.get("return_segment_durations_seconds"),
+                }
+                return_delay = approach_delay + float(route.get("duration_hours") or 0) * 60 + unloading_minutes
+                route["return_smoke_assessment"] = assess_route(
+                    return_leg, smoke_forecast, departure, return_delay,
+                )
+                route["return_fire_hazard"] = assess_fire_hazard(
+                    return_leg, spread_horizons, fire_present, return_delay,
+                )
                 route["destination_verified"] = destination_is_confirmed(
-                    route["site"], pen_counts.get(pen_id, 0), now_for_destination
+                    route["site"], 1, now_for_destination
                 )
 
         threat_level = status["threat_level"]
@@ -686,11 +830,6 @@ async def main():
         )
         animals_moved = 0
         animals_remaining = 0
-        site_remaining_head = {}
-        for site in evac_sites:
-            site_key = (round(float(site["lat"]), 5), round(float(site["lon"]), 5))
-            if destination_is_confirmed(site, 0, now_for_destination):
-                site_remaining_head[site_key] = int(site["accepted_head"])
 
         ordered_pens = sorted(
             farm["pens"],
@@ -705,6 +844,7 @@ async def main():
             if pen_id not in pen_routes or not pen_routes[pen_id]:
                 pens_output.append({
                     "pen_id": pen_id,
+                    "count": int(pen.get("count", 0)),
                     "lat": pen["centroid"]["lat"],
                     "lon": pen["centroid"]["lon"],
                     "species": pen["species"],
@@ -719,6 +859,7 @@ async def main():
                     "assigned_vehicle": None,
                     "movement_status": "pending_review",
                     "route_options": [],
+                    "time_to_impact_hours": time_to_impact,
                 })
                 animals_remaining += pen["count"]
                 continue
@@ -727,17 +868,6 @@ async def main():
             eta_margin = fire_eta_margin()
             ranking = rank_routes(routes, impact_eta_hours=time_to_impact,
                                   loading_minutes=loading_minutes, deadline_margin=eta_margin)
-            capacity_feasible = []
-            for candidate in ranking["ranked"]:
-                site = candidate["site"]
-                key = (round(float(site["lat"]), 5), round(float(site["lon"]), 5))
-                if site_remaining_head.get(key, 0) >= int(pen.get("count", 0)):
-                    capacity_feasible.append(candidate)
-            if ranking["ranked"] and not capacity_feasible:
-                ranking["review_required"].append({
-                    "review_reason": "receiving-site capacity is already allocated to higher-priority pens"
-                })
-            ranking["ranked"] = capacity_feasible
             best = ranking["ranked"][0] if ranking["ranked"] else None
             preview = best or min(routes, key=lambda route: route["duration_hours"])
             best_duration = preview["duration_hours"]
@@ -746,16 +876,13 @@ async def main():
                 "lon": preview["site"]["lon"], "distance_km": preview["distance_km"],
             } if best else None
             if best:
-                if not reserve_site_capacity(site_remaining_head, best["site"], int(pen.get("count", 0))):
-                    raise RuntimeError("Receiving-site capacity changed during serialized livestock planning")
                 decision = "evacuate"
                 assessment_status = "assessed"
-                decision_reason = "Verified destination, deadline and complete smoke coverage"
+                decision_reason = "Verified route and destination; trip capacity is assigned by the vehicle schedule"
                 movement_status = "planned"
-                animals_moved += pen["count"]  # planned count, relabeled below; no movement is confirmed here.
             else:
                 decision = "review_required"
-                assessment_status = "partial" if any(r["smoke_assessment"]["status"] == "assessed" for r in routes) else "unknown"
+                assessment_status = "partial" if any(r.get("smoke_assessment", {}).get("status") == "assessed" for r in routes) else "unknown"
                 reasons = [r.get("rejection_reason") or r.get("review_reason") for r in ranking["rejected"] + ranking["review_required"]]
                 decision_reason = "; ".join(dict.fromkeys(reason for reason in reasons if reason)) or "Route assessment incomplete"
                 movement_status = "pending_review"
@@ -763,11 +890,14 @@ async def main():
 
             pens_output.append({
                 "pen_id": pen_id,
+                "count": int(pen.get("count", 0)),
                 "lat": pen["centroid"]["lat"],
                 "lon": pen["centroid"]["lon"],
                 "species": pen["species"],
                 "priority_score": priority_score,
                 "decision": decision,
+                "splittable": pen.get("splittable") is True,
+                "time_to_impact_hours": time_to_impact,
                 "decision_reason": decision_reason,
                 "assigned_evac_site": best_site,
                 "candidate_evac_site": {"name": preview["site"]["name"], "lat": preview["site"]["lat"],
@@ -781,6 +911,22 @@ async def main():
                 "route_options": [{"route_id": r.get("route_id"), "site": r["site"],
                                    "duration_hours": r["duration_hours"], "distance_km": r["distance_km"],
                                    "source": r["source"], "geometry": r.get("geometry"),
+                                   "approach_duration_hours": r.get("approach_duration_hours"),
+                                   "approach_distance_km": r.get("approach_distance_km"),
+                                   "approach_source": r.get("approach_source"),
+                                   "approach_geometry": r.get("approach_geometry"),
+                                   "approach_segment_durations_seconds": r.get("approach_segment_durations_seconds"),
+                                   "approach_segment_distances_meters": r.get("approach_segment_distances_meters"),
+                                   "approach_smoke_assessment": r.get("approach_smoke_assessment"),
+                                   "approach_fire_hazard": r.get("approach_fire_hazard"),
+                                   "return_duration_hours": r.get("return_duration_hours"),
+                                   "return_distance_km": r.get("return_distance_km"),
+                                   "return_source": r.get("return_source"),
+                                   "return_geometry": r.get("return_geometry"),
+                                   "return_segment_durations_seconds": r.get("return_segment_durations_seconds"),
+                                   "return_segment_distances_meters": r.get("return_segment_distances_meters"),
+                                   "return_smoke_assessment": r.get("return_smoke_assessment"),
+                                   "return_fire_hazard": r.get("return_fire_hazard"),
                                    "smoke_assessment": r.get("smoke_assessment"),
                                    "fire_hazard": r.get("fire_hazard"),
                                    "rejection_reason": r.get("rejection_reason"),
@@ -792,12 +938,118 @@ async def main():
 
         pens_output.sort(key=lambda p: p["priority_score"], reverse=True)
 
-        # Compute evacuation optimization
-        known_etas = [value for value in pen_impacts.values() if value is not None]
-        time_available_hours = min(known_etas) if known_etas else 0.0
-        evac_optimization = apply_transport_plan(pens_output, farm, time_available_hours)
-        animals_moved = sum(int(p.get("animals_planned_to_move", 0)) for p in pens_output)
-        logger.info(f"Evacuation Optimization: Can save ${evac_optimization['summary']['value_can_save_usd']:,.0f} of ${evac_optimization['summary']['value_can_save_usd'] + evac_optimization['summary']['potential_loss_usd']:,.0f}")
+        # Match crop advice to this farm and forecast run before presenting it beside transport options.
+        crop_dir = LIVESTOCK_DIR.parent / "crop_agent"
+        crop_output = load_latest_crop_output(crop_dir)
+        try:
+            farm_fields = json.loads((crop_dir / "farm_fields.json").read_text())
+        except (OSError, json.JSONDecodeError):
+            farm_fields = {"fields": []}
+        valid_field_ids = {str(field.get("field_id")) for field in farm_fields.get("fields", []) if field.get("field_id")}
+        crop_tasks = normalize_crop_tasks(crop_output, farm.get("farm_id"), status.get("run_id"), valid_field_ids)
+
+        def assess_leg_at(route: Dict[str, Any], departure_offset_minutes: float) -> tuple[Dict[str, Any], Dict[str, Any]]:
+            duration = route.get("duration_hours")
+            if duration == 0:
+                return ({"status": "clear", "intersects": False}, {"status": "assessed", "integrated_exposure_ug_h_m3": 0.0})
+            if not route.get("geometry"):
+                return ({"status": "unknown", "intersects": None}, {"status": "unknown", "reason": "verified route geometry unavailable"})
+            offset = max(0.0, departure_offset_minutes)
+            smoke = assess_route(route, smoke_forecast, departure, offset)
+            fire = assess_fire_hazard(route, spread_horizons, fire_present, offset)
+            return fire, smoke
+
+        def offset_minutes(when: datetime) -> float:
+            return (when - departure).total_seconds() / 60
+
+        def assess_scheduled_route(option: Dict[str, Any], positioning_departure: datetime,
+                                   outbound_departure: datetime, return_departure: datetime) -> Dict[str, Any]:
+            approach = {"duration_hours": option.get("approach_duration_hours"),
+                        "geometry": option.get("approach_geometry"),
+                        "segment_durations_seconds": option.get("approach_segment_durations_seconds")}
+            outbound = {"duration_hours": option.get("duration_hours"), "geometry": option.get("geometry"),
+                        "segment_durations_seconds": option.get("segment_durations_seconds")}
+            return_leg = {"duration_hours": option.get("return_duration_hours"),
+                          "geometry": option.get("return_geometry"),
+                          "segment_durations_seconds": option.get("return_segment_durations_seconds")}
+            approach_fire, approach_smoke = assess_leg_at(
+                approach, offset_minutes(positioning_departure))
+            outbound_fire, outbound_smoke = assess_leg_at(
+                outbound, offset_minutes(outbound_departure))
+            return_fire, return_smoke = assess_leg_at(
+                return_leg, offset_minutes(return_departure))
+            return {"approach_fire": approach_fire, "approach_smoke": approach_smoke,
+                    "outbound_fire": outbound_fire, "outbound_smoke": outbound_smoke,
+                    "return_fire": return_fire, "return_smoke": return_smoke}
+
+        transport_schedule = schedule_evacuation_trips(
+            pens_output, farm, departure,
+            config={"loading_minutes": loading_minutes,
+                    "unloading_minutes": unloading_minutes,
+                    "fire_eta_margin": fire_eta_margin()},
+            crop_tasks=crop_tasks,
+            route_assessor=assess_scheduled_route,
+        )
+        animals_moved = 0
+        for pen_result in pens_output:
+            pen_id = pen_result["pen_id"]
+            count = int(pen_result.get("count", 0))
+            allocated = int(transport_schedule["scheduled_by_pen"].get(pen_id, 0))
+            pen_result["animals_planned_to_move"] = allocated
+            pen_trips = [trip for trip in transport_schedule["trips"] if trip["pen_id"] == pen_id]
+            pen_result["scheduled_trip_ids"] = [trip["trip_id"] for trip in pen_trips]
+            if pen_trips:
+                pen_result["assigned_vehicle"] = pen_trips[0]["vehicle_id"]
+                pen_result["assigned_evac_site"] = pen_trips[0]["destination"]
+                animals_moved += allocated
+            if allocated == 0 and pen_result["decision"] == "evacuate":
+                pen_result["decision"] = "review_required"
+                pen_result["assessment_status"] = "partial"
+                pen_result["movement_status"] = "pending_review"
+                pen_result["decision_reason"] = transport_schedule["unscheduled_by_pen"].get(
+                    pen_id, "No deadline-feasible vehicle trip was scheduled")
+            elif 0 < allocated < count:
+                pen_result["decision"] = "partial_plan"
+                pen_result["assessment_status"] = "partial"
+                pen_result["movement_status"] = "planned_partial"
+                pen_result["decision_reason"] = (
+                    f"Scheduled {allocated} of {count} animals; "
+                    + transport_schedule["unscheduled_by_pen"].get(pen_id, "remaining animals need review")
+                )
+
+        total_value_at_risk = sum(int(p.get("count", 0)) * float(p.get("avg_market_value_usd", 0))
+                                  for p in farm.get("pens", []))
+        value_saved = sum(int(result.get("animals_planned_to_move", 0))
+                          * float(next((pen.get("avg_market_value_usd", 0) for pen in farm["pens"]
+                                       if pen.get("pen_id") == result["pen_id"]), 0))
+                          for result in pens_output)
+        potential_loss = max(0.0, total_value_at_risk - value_saved)
+        animals_at_risk = sum(int(p.get("count", 0)) for p in farm.get("pens", []))
+        animals_remaining = max(0, animals_at_risk - animals_moved)
+        evacuation_summary = {
+            "total_animals_at_risk": animals_at_risk,
+            "animals_can_evacuate": animals_moved,
+            "value_can_save_usd": round(value_saved, 2),
+            "potential_loss_usd": round(potential_loss, 2),
+            "loss_percentage": round(potential_loss / total_value_at_risk * 100, 1) if total_value_at_risk else 0,
+            "vehicle_hours": transport_schedule["summary"]["vehicle_hours"],
+        }
+        evac_optimization = {
+            "transport_capacity": {
+                "vehicles": int(farm.get("infrastructure", {}).get("available_trailers", 0)),
+                "capacity_per_vehicle": int(farm.get("infrastructure", {}).get("vehicle_capacity_head", 0)),
+                "trips_available": len(transport_schedule["trips"]),
+                "total_capacity": animals_moved,
+            },
+            "trips": transport_schedule["trips"],
+            "unscheduled_by_pen": transport_schedule["unscheduled_by_pen"],
+            "crop_tasks": crop_tasks,
+            "summary": evacuation_summary,
+        }
+        multi_trip_rationale = await explain_multitrip_value_locally(transport_schedule, crop_tasks)
+        if multi_trip_rationale:
+            evac_optimization["multi_trip_rationale"] = multi_trip_rationale
+        logger.info("Transport schedule covers %s animals in %s trips", animals_moved, len(transport_schedule["trips"]))
 
         run_blockers = list(dict.fromkeys(
             pen["decision_reason"] for pen in pens_output
@@ -863,18 +1115,24 @@ async def main():
             ),
             "planning_assumptions": {"fire_eta_margin": fire_eta_margin(),
                                      "loading_delay_minutes": loading_minutes,
+                                     "unloading_delay_minutes": unloading_minutes,
+                                     "pen_splitting_default": False,
+                                     "scheduler": "deadline-slack then earliest safe vehicle finish",
                                      "movement_confirmed": False},
             "smoke_forecast": {key: value for key, value in smoke_forecast.items() if key != "layers"},
             "threat_level": threat_level,
             "phase": phase,
             "pens": pens_output,
+            "trip_schedule": transport_schedule["trips"],
+            "crop_tasks_considered": crop_tasks,
+            "multi_trip_rationale": multi_trip_rationale,
             "transport_pool": pool_blocks,
             "evacuation_optimization": evac_optimization,
             "blockers": run_blockers,
             "animals_at_risk_usd": total_animals_at_risk,
             "animals_moved_count": 0,
             "animals_planned_to_move_count": animals_moved,
-            "animals_remaining_count": sum(int(p.get("count", 0)) for p in farm.get("pens", []))
+            "animals_remaining_count": max(0, animals_at_risk - animals_moved)
         }
 
         erpc_message = {
@@ -887,8 +1145,12 @@ async def main():
             "blockers": run_blockers,
             "transport_pool": pool_blocks,
             "cost_optimization": evac_optimization["summary"],
+            "trip_schedule_summary": {"trip_count": len(transport_schedule["trips"]),
+                                      "animals_scheduled": animals_moved,
+                                      "vehicle_hours": transport_schedule["summary"]["vehicle_hours"]},
+            "crop_messages": crop_tasks,
+            "multi_trip_rationale": multi_trip_rationale,
             "forecasting_requests": forecast_requests,
-            "crop_messages": []
         }
 
         for filename, value in (("livestock_status.json", livestock_status), ("erpc_message.json", erpc_message)):
@@ -896,7 +1158,7 @@ async def main():
             temp.write_text(json.dumps(value, indent=2))
             temp.replace(LIVESTOCK_DIR / filename)
 
-        logger.info(f"Cycle complete. Animals at risk: {total_animals_at_risk} USD. Moved: {animals_moved}, Remaining: {animals_remaining}")
+        logger.info(f"Cycle complete. Animals at risk: {total_animals_at_risk} USD. Planned: {animals_moved}, Remaining: {animals_remaining}")
 
 
 if __name__ == "__main__":

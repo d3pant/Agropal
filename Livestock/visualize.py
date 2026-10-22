@@ -166,6 +166,16 @@ html_content = """<!DOCTYPE html>
             </div>
 
             <div>
+                <div class="section-title">🚚 Vehicle Trip Schedule</div>
+                <div class="pen-list" id="tripSchedule"></div>
+            </div>
+
+            <div>
+                <div class="section-title">🌱 Crop Tasks to Review</div>
+                <div class="pen-list" id="cropContext"></div>
+            </div>
+
+            <div>
                 <div class="section-title">🤝 Partnerships</div>
                 <div id="poolList"></div>
             </div>
@@ -276,6 +286,49 @@ html_content = """<!DOCTYPE html>
         // Cost optimization
         const statusData = """ + json.dumps(status) + """;
         const optimization = statusData.evacuation_optimization || {};
+        const tripSchedule = document.getElementById('tripSchedule');
+        const trips = statusData.trip_schedule || optimization.trips || [];
+        if (!trips.length) {
+            const empty = document.createElement('div');
+            empty.className = 'pool-item';
+            empty.textContent = 'No deadline-feasible trips are scheduled. Review the blockers below.';
+            tripSchedule.appendChild(empty);
+        }
+        trips.forEach(trip => {
+            const item = document.createElement('div');
+            item.className = 'pool-item';
+            const title = document.createElement('div');
+            title.style.fontWeight = '600';
+            title.style.color = '#93c5fd';
+            title.textContent = `${trip.vehicle_id} · Trip ${trip.trip_number}`;
+            const details = document.createElement('div');
+            details.className = 'pool-stat';
+            details.textContent = `${trip.animal_count} animals from ${trip.pen_id} → ${trip.destination?.name || 'unknown site'}`;
+            const timing = document.createElement('div');
+            timing.className = 'pool-stat';
+            timing.textContent = `Depart ${trip.depart_at ? new Date(trip.depart_at).toLocaleTimeString() : 'unknown'} · arrive ${trip.arrive_at ? new Date(trip.arrive_at).toLocaleTimeString() : 'unknown'}`;
+            const margin = document.createElement('div');
+            margin.className = 'pool-stat';
+            margin.textContent = trip.round_trip_possible
+                ? `Return ${new Date(trip.return_at).toLocaleTimeString()} · ${trip.deadline_margin_minutes} min deadline margin`
+                : 'One-way only; vehicle removed from later trips';
+            item.append(title, details, timing, margin);
+            tripSchedule.appendChild(item);
+        });
+
+        const cropContext = document.getElementById('cropContext');
+        (statusData.crop_tasks_considered || []).forEach(task => {
+            const item = document.createElement('div');
+            item.className = 'pool-item';
+            item.textContent = `${task.field_id}: ${task.task_type} · duration ${task.duration_hours == null ? 'unknown' : `${task.duration_hours} h`} · resources ${task.resource_status}`;
+            cropContext.appendChild(item);
+        });
+        if (statusData.multi_trip_rationale) {
+            const rationale = document.createElement('div');
+            rationale.className = 'pool-item';
+            rationale.textContent = statusData.multi_trip_rationale;
+            cropContext.appendChild(rationale);
+        }
         if (optimization.summary) {
             const optBox = document.getElementById('optimizationBox');
             const summary = optimization.summary;
