@@ -9,7 +9,7 @@ Usage:
     python econ_agent.py [--dry-run]
 
 Live data sources (fall back to mock/hardcoded if unavailable):
-  - Crop data: crop_agent/crop_agent_output_*.json (latest file)
+  - Crop data: newest crop agent report, via common.load_crop_output()
   - Livestock data: Livestock/erpc_message.json
 
 All cost constants are in COST_ASSUMPTIONS. See ECON_AGENT_PLAN.md.
