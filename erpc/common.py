@@ -16,6 +16,7 @@ from typing import Optional
 # --- Paths -----------------------------------------------------------------
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+SETUP_SENTINEL = REPO_ROOT / ".farm_setup_done"
 FORECASTER_DIR = REPO_ROOT / "forecaster"
 OUTPUT_DIR = FORECASTER_DIR / "output"
 CONFIG_DIR = FORECASTER_DIR / "config"
@@ -26,6 +27,7 @@ CROP_AGENT_DIR = REPO_ROOT / "crop_agent"
 LIVESTOCK_DIR = REPO_ROOT / "Livestock"
 
 FARM_CONFIG = CONFIG_DIR / "farm_config.json"
+ECONOMIC_COSTS = CONFIG_DIR / "economic_costs.json"
 FARM_FIELDS_JSON = CROP_AGENT_DIR / "farm_fields.json"
 LIVESTOCK_ERPC_MSG = LIVESTOCK_DIR / "erpc_message.json"
 LIVESTOCK_STATUS = LIVESTOCK_DIR / "livestock_status.json"

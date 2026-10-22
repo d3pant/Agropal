@@ -1,8 +1,8 @@
 """
 Fetch surface fuel model flammability per field from LANDFIRE.
 Uses Landfire_CONUS_2022 MapServer layer 24 (FBFM40 — Scott & Burgan 40).
-Falls back to crop-type estimate if LANDFIRE returns non-burnable or fails
-(agricultural fields are sometimes misclassified NB in LANDFIRE).
+Requires a usable LANDFIRE result. Missing or non-burnable data is surfaced as
+unavailable instead of replaced with a crop-type guess.
 """
 
 import requests
@@ -25,25 +25,6 @@ _FBFM40 = {
     181: 2, 182: 2, 183: 2, 184: 2, 185: 2, 186: 3, 187: 3, 188: 3, 189: 3,
     201: 4, 202: 4, 203: 5, 204: 4,
 }
-
-# Fallback when LANDFIRE fails or returns NB for a crop field
-_CROP_FALLBACK = {
-    "cover_crop":   5,
-    "wheat":        4,
-    "corn":         4,
-    "sorghum":      4,
-    "tomatoes":     3,
-    "strawberries": 3,
-    "potatoes":     3,
-    "alfalfa":      3,
-    "grapes":       2,
-    "citrus":       2,
-    "almonds":      2,
-    "walnuts":      2,
-    "avocado":      1,
-    "olive":        1,
-}
-
 
 def fetch_flammability(lat: float, lon: float, crop_category: str = "") -> dict:
     """
@@ -75,13 +56,7 @@ def fetch_flammability(lat: float, lon: float, crop_category: str = "") -> dict:
         score = _FBFM40.get(code)
 
         if score is None or score == 0:
-            # NB or unknown code — LANDFIRE often misclassifies active cropland as NB
-            fallback = _CROP_FALLBACK.get(crop_category.lower(), 3)
-            return {
-                "flammability":    fallback,
-                "fuel_model_code": code,
-                "source":          f"LANDFIRE NB({code}) → crop-type fallback",
-            }
+            raise ValueError(f"LANDFIRE returned non-burnable or unmapped fuel model {code}")
 
         return {
             "flammability":    score,
@@ -90,12 +65,7 @@ def fetch_flammability(lat: float, lon: float, crop_category: str = "") -> dict:
         }
 
     except Exception as e:
-        fallback = _CROP_FALLBACK.get(crop_category.lower(), 3)
-        return {
-            "flammability":    fallback,
-            "fuel_model_code": None,
-            "source":          f"LANDFIRE error ({e}) → crop-type fallback",
-        }
+        raise RuntimeError(f"LANDFIRE data unavailable for field location ({lat}, {lon}): {e}") from e
 
 
 def fetch_field_flammability(fields: list) -> dict:

@@ -23,20 +23,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# USDA NASS QuickStats API prices (2024 average, $/head)
-USDA_NASS_PRICES = {
-    "cattle": 1450,      # Feeder cattle
-    "horse": 3500,       # Horse
-    "sheep": 350,        # Lamb/sheep
-    "pig": 550,          # Hog
-    "goat": 300,         # Goat
-}
-
 LIVESTOCK_DIR = Path(__file__).parent
-FAIRPLEX_POMONA = {"lat": 34.0564, "lon": -117.7500, "name": "Fairplex Pomona"}
-DEL_MAR_FAIRGROUNDS = {"lat": 32.9595, "lon": -117.2653, "name": "Del Mar Fairgrounds"}
-
-FALLBACK_SITES = [FAIRPLEX_POMONA, DEL_MAR_FAIRGROUNDS]
 
 BASE_SPECIES_SCORES = {
     "cattle": 40,
@@ -90,7 +77,7 @@ def compute_priority_score(pen: Dict[str, Any], time_to_impact_hours: float | No
     age_modifier = AGE_MODIFIERS.get(pen["age_distribution"], 0)
     health_modifier = HEALTH_MODIFIERS.get(pen["health_status"], 0)
 
-    avg_value = pen.get("avg_market_value_usd", 0)
+    avg_value = pen["avg_market_value_usd"]
     value_score = min(20, (avg_value / 2000) * 20)
 
     zone_urgency = min(30, max(0, 100 - (time_to_impact_hours * 8))) if time_to_impact_hours is not None else 0
@@ -110,16 +97,16 @@ def compute_evacuation_optimization(pens_output: List[Dict], farm: Dict[str, Any
     Pens that fit entirely go first (sorted by score desc), then partial fill
     of the highest-value remaining pen to use every slot.
     """
-    vehicle_capacity = farm.get("infrastructure", {}).get("vehicle_capacity_head", 150)
-    available_trailers = farm.get("infrastructure", {}).get("available_trailers", 1)
+    vehicle_capacity = farm["infrastructure"]["vehicle_capacity_head"]
+    available_trailers = farm["infrastructure"]["available_trailers"]
 
     # Realistic trips: time_available / (2 * avg_route_time), min 1
     evacuable_pens_raw = [p for p in pens_output if p["decision"] == "evacuate"]
     avg_route = (
         sum(p["route_duration_hours"] for p in evacuable_pens_raw) / len(evacuable_pens_raw)
-        if evacuable_pens_raw else 1.0
+        if evacuable_pens_raw else 0.0
     )
-    trips_per_trailer = max(1, int(time_available_hours / (2 * avg_route)))
+    trips_per_trailer = max(1, int(time_available_hours / (2 * avg_route))) if avg_route else 0
     total_capacity = vehicle_capacity * available_trailers * trips_per_trailer
 
     pen_lookup = {pen["pen_id"]: pen for pen in farm["pens"]}
@@ -272,37 +259,44 @@ def apply_transport_plan(pens_output: List[Dict], farm: Dict[str, Any],
 async def fetch_usda_prices(client: httpx.AsyncClient) -> Dict[str, float]:
     """Fetch live USDA NASS prices if API key is set, otherwise use 2024 hardcoded values."""
     api_key = os.getenv("USDA_NASS_API_KEY", "")
+    if not species_needed:
+        return {}
     if not api_key:
-        logger.info("USDA_NASS_API_KEY not set — using hardcoded 2024 prices")
-        return USDA_NASS_PRICES
-
+        raise RuntimeError("USDA_NASS_API_KEY is required; no livestock price defaults are available")
     commodities = {
-        "cattle": "CATTLE, FEEDER",
-        "horse": "HORSES",
-        "sheep": "SHEEP & LAMBS",
-        "pig": "HOGS",
-        "goat": "GOATS"
+        "cattle": "CATTLE, FEEDER", "horse": "HORSES", "sheep": "SHEEP & LAMBS",
+        "pig": "HOGS", "goat": "GOATS",
     }
+    unknown = species_needed - commodities.keys()
+    if unknown:
+        raise RuntimeError(f"No USDA NASS commodity mapping for livestock species: {sorted(unknown)}")
     prices = {}
-    for species, commodity in commodities.items():
+    for species in species_needed:
         try:
-            url = "https://quickstats.nass.usda.gov/api/api_GET/"
-            params = {
-                "key": api_key,
-                "commodity_desc": commodity,
-                "statisticcat_desc": "PRICE RECEIVED",
-                "year": str(datetime.now().year - 1),
-                "format": "JSON"
-            }
-            response = await client.get(url, params=params, timeout=5.0)
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("data"):
-                    prices[species] = float(data["data"][0].get("Value", USDA_NASS_PRICES[species]))
+            record = None
+            for year in range(datetime.now().year, datetime.now().year - 6, -1):
+                response = await client.get(
+                    "https://quickstats.nass.usda.gov/api/api_GET/",
+                    params={"key": api_key, "commodity_desc": commodities[species],
+                            "state_alpha": "CA", "agg_level_desc": "STATE",
+                            "statisticcat_desc": "PRICE RECEIVED", "year": str(year),
+                            "format": "JSON"}, timeout=5.0,
+                )
+                if response.status_code != 200:
                     continue
-        except Exception as e:
-            logger.warning(f"USDA NASS {species}: {e}")
-        prices[species] = USDA_NASS_PRICES[species]
+                records = [r for r in response.json().get("data", [])
+                           if r.get("Value") not in (None, "", "(D)", "(NA)", "(Z)")]
+                if records:
+                    record = records[-1]
+                    break
+            if record is None:
+                raise RuntimeError("USDA NASS returned no usable price records in the last six years")
+            unit = record.get("unit_desc", "").lower()
+            if "head" not in unit:
+                raise RuntimeError(f"USDA NASS unit {unit!r} cannot be treated as a per-head value")
+            prices[species] = float(record["Value"].replace(",", ""))
+        except Exception as exc:
+            raise RuntimeError(f"No usable USDA NASS per-head price for {species}: {exc}") from exc
     return prices
 
 
@@ -337,7 +331,9 @@ async def query_calaes(client: httpx.AsyncClient, lat: float, lon: float) -> Lis
         for feature in filtered:
             props = feature.get("properties", {})
             geom = feature.get("geometry", {})
-            coords = geom.get("coordinates", [0, 0])
+            coords = geom.get("coordinates")
+            if not coords or len(coords) < 2:
+                continue
 
             site = {
                 "name": props.get("ZoneName") or props.get("ExternalIdentifier", "Unknown"),
@@ -346,7 +342,9 @@ async def query_calaes(client: httpx.AsyncClient, lat: float, lon: float) -> Lis
             }
             sites.append(site)
 
-        return sites if sites else FALLBACK_SITES
+        if not sites:
+            raise RuntimeError("CalOES returned no evacuation sites for this farm location")
+        return sites
     except (httpx.TimeoutException, httpx.HTTPError, Exception) as e:
         logger.warning(f"CalOES API error: {e}. Using fallback sites.")
         return FALLBACK_SITES
@@ -645,6 +643,8 @@ async def compute_return_trip(
 
 
 async def main():
+    if not (LIVESTOCK_DIR.parent / ".farm_setup_done").exists():
+        raise RuntimeError("Complete farmer setup before running the livestock agent; bundled demo inventory is disabled.")
     with open(LIVESTOCK_DIR / "status.json") as f:
         status = json.load(f)
 
@@ -706,11 +706,12 @@ async def main():
 
     # Fetch live USDA NASS prices
     async with httpx.AsyncClient() as price_client:
-        usda_prices = await fetch_usda_prices(price_client)
+        usda_prices = await fetch_usda_prices(price_client, {pen["species"] for pen in farm["pens"]})
         logger.info(f"Using USDA NASS prices: {usda_prices}")
 
-    with open(LIVESTOCK_DIR / "neighboring_farms.json") as f:
-        neighbors_data = json.load(f)
+    # Neighbor inventories are private third-party data and are not connected;
+    # never use the bundled demo neighbor file for pooling decisions.
+    neighbors_data = {"farms": []}
 
     async with httpx.AsyncClient() as client:
         farm_centroid = farm["centroid"]
@@ -728,7 +729,7 @@ async def main():
         # Update pen values with USDA prices
         for pen in farm["pens"]:
             species = pen["species"]
-            pen["avg_market_value_usd"] = usda_prices.get(species, USDA_NASS_PRICES.get(species, 1000))
+            pen["avg_market_value_usd"] = usda_prices[species]
             logger.info(f"Pen {pen['pen_id']} ({species}): ${pen['avg_market_value_usd']}/head")
 
         pen_routes: Dict[str, List[Dict]] = {}
@@ -845,6 +846,7 @@ async def main():
                 pens_output.append({
                     "pen_id": pen_id,
                     "count": int(pen.get("count", 0)),
+                    "avg_market_value_usd": pen["avg_market_value_usd"],
                     "lat": pen["centroid"]["lat"],
                     "lon": pen["centroid"]["lon"],
                     "species": pen["species"],
@@ -891,6 +893,7 @@ async def main():
             pens_output.append({
                 "pen_id": pen_id,
                 "count": int(pen.get("count", 0)),
+                "avg_market_value_usd": pen["avg_market_value_usd"],
                 "lat": pen["centroid"]["lat"],
                 "lon": pen["centroid"]["lon"],
                 "species": pen["species"],

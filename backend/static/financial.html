@@ -479,7 +479,7 @@ function renderEcon() {
   // Cost vs saved grouped bar
   const allActions = [...actions, ...infeasible].filter(a => a.estimated_action_cost_usd > 0 || a.confidence_adjusted_loss_avoided_usd > 0);
   const csvLabels  = allActions.map(a => a.action_id.replace(/_/g,' '));
-  const costs      = allActions.map(a => a.estimated_action_cost_usd || 0);
+  const costs      = allActions.map(a => Number.isFinite(a.estimated_action_cost_usd) ? a.estimated_action_cost_usd : null);
   const saved      = allActions.map(a => a.confidence_adjusted_loss_avoided_usd || 0);
   new Chart(document.getElementById('cost-save-chart'), {
     type: 'bar',

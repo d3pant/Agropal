@@ -10,10 +10,10 @@ available response actions by ROI so the farmer has a single prioritized action 
 
 - [x] Financial loss estimation (crop, livestock, opportunity cost)
 - [x] ROI action ranking engine
-- [x] Hardcoded cost assumptions catalog (logged in output JSON)
+- [x] Farmer-provided current cost inputs (logged in output JSON)
 - [x] Output schema finalized
-- [x] Live crop data from `crop_agent/crop_agent_output_*.json` (with mock fallback)
-- [x] Live livestock data from `Livestock/erpc_message.json` (with hardcoded fallback)
+- [x] Live crop data from USDA NASS and current crop-agent output (no fallback)
+- [x] Live livestock data from current farmer inventory and `Livestock/erpc_message.json` (no fallback)
 - [ ] Integration with ERPC pipeline trigger
 
 ---
@@ -56,14 +56,13 @@ Key fields used per feature:
 - `task1[].uprooting_strategy.labor_hours_needed` → cost input for transplant ROI
 - `task1[].feasible_with_farm_resources` → hard gate: infeasible actions are flagged, not ranked
 - `task3[].urgency` → maps to action priority (IMMEDIATE > SCHEDULED)
-- `task3[].technique` → cost lookup key (e.g., WET FIREBREAK → hardcoded $/acre)
+- `task3[].technique` → cost lookup key (e.g., WET FIREBREAK → farmer-entered $/acre)
 
 ### From Livestock Agent — `Livestock/erpc_message.json`
 
 ```json
 {
   "animal_valuation_at_risk": 442000,
-  "transport_costs_usd": 7455,
   "cost_optimization": {
     "total_animals_at_risk": 497,
     "animals_can_evacuate": 497,
@@ -73,9 +72,7 @@ Key fields used per feature:
 }
 ```
 
-Mapping: `total_animals_at_risk` → `total_head`, `animal_valuation_at_risk / total_head` → `value_per_head_usd`, `transport_costs_usd` → actual EVACUATE_LIVESTOCK action cost.
-
-Falls back to `HARDCODED_LIVESTOCK` (750 head × $1,500/head) if file not found.
+Mapping: `total_animals_at_risk` → `total_head`, `animal_valuation_at_risk / total_head` → `value_per_head_usd`. Transport cost comes from the farmer's current setup quote.
 
 ### From Forecasting Agent
 
@@ -109,9 +106,8 @@ crop_loss_confirmed = crop_loss_total - crop_loss_recoverable
 
 #### Livestock Loss
 
-Source: hardcoded `HARDCODED_LIVESTOCK` until Livestock Agent exists.
-- `at_risk_value_usd = total_head × value_per_head_usd × (1 - evacuated_pct)`
-- Updates each cycle as `evacuated_pct` increases (future: from Livestock Agent)
+Source: current Livestock Agent output, valued using USDA NASS data.
+- `at_risk_value_usd = total_head × value_per_head_usd`
 
 #### Opportunity Cost
 
@@ -122,15 +118,16 @@ What we can compute from current data:
 - **Partial season loss for PARTIAL HARVEST**: `(1 - maturity_pct) × price_per_acre_usd × size_acres`
   — the portion of the season's value that cannot be recovered even with partial harvest.
 
-What we cannot compute yet (hardcoded as None):
+What the agent reports as unavailable until a live source is added:
 - Soil rehabilitation cost (no soil damage data from any agent)
 - Market timing losses (no commodity price forecasting)
 - Labor disruption costs (no labor model)
 
 ```
-opportunity_cost = sum(price_per_acre_usd × size_acres for ABANDON fields)   # 1 lost season
+opportunity_cost = sum(price_per_acre_usd × size_acres × farmer_season_horizon
+                        for ABANDON fields)
                  + sum((1 - maturity_pct) × price_per_acre_usd × size_acres
-                       for PARTIAL HARVEST fields)
+                       × farmer_season_horizon for PARTIAL HARVEST fields)
 ```
 
 #### Total Exposure Summary
@@ -163,16 +160,16 @@ farmer rather than a best-case projection.
 
 #### Action Types and Cost Inputs
 
-All cost inputs below are hardcoded. See "Hardcoded Values" table for the specific
-numbers and which source should replace them.
+All operational cost inputs are entered by the farmer during setup and recorded in
+`farmer_cost_inputs_used` in the econ report.
 
 | Action | Derived From | Loss Avoided | Cost Formula | Time Required |
 |--------|-------------|-------------|-------------|---------------|
 | HARVEST NOW | `task4.decision = HARVEST NOW` | `confidence_adjusted_loss_usd` (full field) | `HARVEST_LABOR_RATE_USD_PER_HOUR × harvest_hours_estimate` | Must complete before `fire_arrival_hours` |
 | PARTIAL HARVEST | `task4.decision = PARTIAL HARVEST` | `confidence_adjusted_loss_usd × maturity_pct` | `HARVEST_LABOR_RATE_USD_PER_HOUR × harvest_hours_estimate × maturity_pct` | Must complete before `fire_arrival_hours` |
-| TRANSPLANT | `task4.decision = TRANSPLANT` and `task1.feasible_with_farm_resources = True` | Seedling/plant replacement value (hardcoded per crop) | `LABOR_RATE_USD_PER_HOUR × labor_hours_needed` | Must complete before `time_window` |
-| WET FIREBREAK | `task3.technique = WET FIREBREAK` | `confidence_adjusted_loss_usd` of protected field | `FIREBREAK_COST_USD_PER_ACRE × field_size_acres` | Urgency: IMMEDIATE = now, SCHEDULED = within 2h |
-| EVACUATE LIVESTOCK | Hardcoded livestock stub | `at_risk_value_usd` (partial, per pen) | `LIVESTOCK_TRANSPORT_COST_USD_PER_HEAD × head_count` | Based on zone time_to_impact |
+| TRANSPLANT | `task4.decision = TRANSPLANT` and `task1.feasible_with_farm_resources = True` | Farmer-entered seedling value | Farmer-entered labor rate × `labor_hours_needed` | Must complete before `time_window` |
+| WET FIREBREAK | `task3.technique = WET FIREBREAK` | `confidence_adjusted_loss_usd` of protected field | Farmer-entered firebreak cost × field acres | Urgency: IMMEDIATE = now, SCHEDULED = within 2h |
+| EVACUATE LIVESTOCK | Current livestock-agent valuation | `at_risk_value_usd` | Farmer-entered transport quote × head count | Based on zone time_to_impact |
 
 #### Feasibility Gates (hard — action removed from queue if failed)
 
@@ -210,21 +207,9 @@ numbers and which source should replace them.
 
 ---
 
-## Hardcoded Values (Replace When Dynamic Data Available)
+## Data and Cost Inputs
 
-All cost constants are hardcoded in `econ_agent.py` as a `COST_ASSUMPTIONS` dict.
-
-| Constant | Hardcoded Value | Unit | Make Dynamic From |
-|----------|----------------|------|-------------------|
-| `HARVEST_LABOR_RATE_USD_PER_HOUR` | 25 | $/hr | Farmer labor cost input or regional USDA farm wage data |
-| `HARVEST_HOURS_PER_ACRE` | 4 | hrs/acre | Crop-specific — hardcoded average; make per-crop from crop agent |
-| `FIREBREAK_COST_USD_PER_ACRE` | 150 | $/acre | CAL FIRE cost estimates or farmer input |
-| `LIVESTOCK_TRANSPORT_COST_USD_PER_HEAD` | 35 | $/head | **Now live** from `Livestock/erpc_message.json` `transport_costs_usd` |
-| `LIVESTOCK_VALUE_PER_HEAD_USD` | 1500 | $/head | **Now live** from `animal_valuation_at_risk / total_animals_at_risk` |
-| `LIVESTOCK_TOTAL_HEAD` | 750 | head | **Now live** from `Livestock/erpc_message.json` `total_animals_at_risk` |
-| `LIVESTOCK_EVACUATED_PCT` | 0.0 | fraction | Still hardcoded — needs real-time evacuation status from Livestock Agent |
-| `TRANSPLANT_SEEDLING_VALUE_USD_PER_ACRE` | 800 | $/acre | Crop agent or nursery price index |
-| `OPPORTUNITY_COST_SEASONS` | 1 | seasons | Agronomist input — assumed 1 lost season for ABANDON fields |
+The agent requires a completed farmer setup, fresh crop and livestock agent outputs, USDA NASS yield and price records, and farmer-entered current operating cost inputs. It stops with an error when any required live data is missing; it does not synthesize crop reports or livestock counts, use bundled demo inventories, or substitute historical hardcoded prices. The setup form collects labor, harvest time, firebreak, livestock transport, transplant, and lost-season inputs, which are recorded in `farmer_cost_inputs_used` in the econ report.
 
 ---
 
@@ -244,7 +229,7 @@ All cost constants are hardcoded in `econ_agent.py` as a `COST_ASSUMPTIONS` dict
 ## Dependencies & Integration Points
 
 - **Input from Crop Agent:** `crop_agent/crop_agent_output_*.json` (latest) — keys remapped: `field_decisions`→task4, `fire_reduction`→task1, `economic_impact`→task2, `hydration_strategy`→task3
-- **Input from Livestock Agent:** `Livestock/erpc_message.json` — `total_animals_at_risk`, `animal_valuation_at_risk`, `transport_costs_usd`
+- **Input from Livestock Agent:** `Livestock/erpc_message.json` — `total_animals_at_risk`, `animal_valuation_at_risk`
 - **Input from Forecasting Agent:** `forecaster/output/status.json` → `threat_level`
 - **Output to ERPC:** `econ_report.json` — financial exposure breakdown + ranked action list
 - **Output written to:** `forecaster/output/econ_report.json`
@@ -267,12 +252,12 @@ All cost constants are hardcoded in `econ_agent.py` as a `COST_ASSUMPTIONS` dict
         "total_exposure_usd": float,
         "breakdown_by_crop": { crop_category: confidence_adjusted_loss_usd },
     },
-    "cost_assumptions_used": { ...COST_ASSUMPTIONS },   # logged for transparency
+    "farmer_cost_inputs_used": { ... },                  # entered during farm setup
     "action_queue": [ EconAction, ... ],                # sorted by priority
     "infeasible_actions": [ EconAction, ... ],          # feasible=False, shown separately
     "data_sources": {
         "crop_agent": "live" | "unavailable",
-        "livestock_agent": "hardcoded_stub",            # updated when agent exists
+        "livestock_agent": "live" | "unavailable",
     }
 }
 ```

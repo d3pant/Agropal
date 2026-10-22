@@ -591,7 +591,6 @@ const HORIZON_STYLE = {
 const SPECIES_EMOJI = { cattle:"🐄", horse:"🐴", sheep:"🐑", pig:"🐷", goat:"🐐" };
 const SPECIES_COLOR = { cattle:"#dc2626", horse:"#ea580c", sheep:"#2563eb", pig:"#9333ea", goat:"#16a34a" };
 const CROP_EMOJI    = { avocado:"🥑", tomato:"🍅", tomatoes:"🍅", corn:"🌽", wheat:"🌾", strawberry:"🍓", citrus:"🍊", orange:"🍊", cotton:"🌿", soybean:"🫘", potato:"🥔" };
-const CROP_PRICE_PER_ACRE = { avocado:8000, tomatoes:4500, tomato:4500, corn:1200, wheat:900, strawberry:15000, citrus:6000, cotton:800, soybean:700, potato:5000 };
 
 function windCardinal(deg) {
   return ["N","NE","E","SE","S","SW","W","NW"][Math.round(deg/45)%8];
@@ -1015,33 +1014,31 @@ function renderAssets() {
   const statusPens  = livestockData?.pens || [];
   profilePens.forEach(pp => {
     const statusPen = statusPens.find(s => s.pen_id === pp.pen_id) || {};
-    const count  = pp.count || 0;
-    const price  = pp.avg_market_value_usd || { cattle:1450, horse:3500, sheep:350, pig:550, goat:300 }[pp.species] || 1000;
-    const penVal = count * price;
-    total += penVal;
+    const count  = pp.count;
+    const hasPrice = Number.isFinite(statusPen.avg_market_value_usd);
+    const penVal = hasPrice ? count * statusPen.avg_market_value_usd : null;
+    if (penVal != null) total += penVal;
     const dec = statusPen.decision;
     const decLabel = dec === "evacuate" ? `<span style="color:var(--green);font-size:11px;font-weight:600;">EVACUATE</span>` :
                      dec ? `<span style="color:var(--orange);font-size:11px;font-weight:600;">${dec.toUpperCase()}</span>` : "";
     rows.push(`<div class="asset-row">
       <div class="asset-emoji">${SPECIES_EMOJI[pp.species] || "🐾"}</div>
       <div class="asset-name">${pp.species?.charAt(0).toUpperCase()+pp.species?.slice(1)} <span style="color:var(--text3);font-size:11px;">${count} head · ${pp.pen_id}</span> ${decLabel}</div>
-      <div class="asset-val">${fmt$(penVal)}</div>
+      <div class="asset-val">${penVal == null ? "—" : fmt$(penVal)}</div>
     </div>`);
   });
 
   // Crop fields — cross-reference with farm_fields for acreage
   const fields = cropData?.field_decisions || [];
   fields.forEach(fd => {
-    const pricePerAcre = CROP_PRICE_PER_ACRE[fd.crop_category?.toLowerCase()] || 3000;
-    const estAcres = fd.size_acres || 10; // fallback
-    const estVal = pricePerAcre * estAcres;
-    total += estVal;
+    const estVal = Number.isFinite(fd.confidence_adjusted_value_usd) ? fd.confidence_adjusted_value_usd : null;
+    if (estVal != null) total += estVal;
     const dec = fd.decision?.toUpperCase();
     const decColor = dec === "HARVEST NOW" ? "var(--green)" : dec === "ABANDON" ? "var(--fire)" : "var(--orange)";
     rows.push(`<div class="asset-row">
       <div class="asset-emoji">${CROP_EMOJI[fd.crop_category?.toLowerCase()] || "🌱"}</div>
       <div class="asset-name">${fd.crop_category} <span style="color:${decColor};font-size:11px;font-weight:600;">${dec || ""}</span></div>
-      <div class="asset-val">${fmt$(estVal)}</div>
+      <div class="asset-val">${estVal == null ? "—" : fmt$(estVal)}</div>
     </div>`);
   });
 
@@ -1085,53 +1082,15 @@ function renderActions() {
       actions.push({
         svg, bg, stroke,
         name: a.action_description,
-        tags: [roiStr, saves > 0 ? `Saves ${fmt$(saves)}` : null, cost > 0 ? `Cost ${fmt$(cost)}` : null, a.urgency].filter(Boolean),
+        tags: [roiStr, saves > 0 ? `Saves ${fmt$(saves)}` : null, cost > 0 ? `Cost ${fmt$(cost)}` : (a.estimated_action_cost_usd == null ? "Cost unavailable" : null), a.urgency].filter(Boolean),
         tagTypes: ["save", "save", "cost", "decision"],
         tab,
       });
     });
-  } else {
-    // Fallback: derive from livestock + crop agent data
-    if (livestockData?.pens) {
-      livestockData.pens.filter(p => p.decision === "evacuate").forEach(pen => {
-        const evac = pen.assigned_evac_site;
-        const saves = (livestockData.animals_at_risk_usd || 0) / (livestockData.pens.length || 1);
-        const cost  = Math.round((pen.route_duration_hours || 1) * 120 * 2);
-        totalSavings += saves;
-        actions.push({
-          svg: ACT_SVG.EVACUATE_LIVESTOCK, bg: "#fde8e8", stroke: "#c0392b",
-          name: `Move ${pen.species} to ${evac?.name || "safe area"}`,
-          tags: [`Cost ${fmt$(cost)}`, `Saves ${fmt$(saves)}`],
-          tagTypes: ["cost", "save"],
-          tab: "livestock",
-        });
-      });
-    }
-    if (cropData?.field_decisions) {
-      cropData.field_decisions.forEach(fd => {
-        const dec = fd.decision?.toUpperCase();
-        if (!dec) return;
-        const priceAcre = CROP_PRICE_PER_ACRE[fd.crop_category?.toLowerCase()] || 3000;
-        const saves = dec === "HARVEST NOW" ? priceAcre * 10 * (fd.maturity_pct || 80) / 100 : 0;
-        totalSavings += saves;
-        const svgMap = { "HARVEST NOW": ACT_SVG.HARVEST, "PARTIAL HARVEST": ACT_SVG.PARTIAL_HARVEST, "ABANDON": ACT_SVG.ABANDON, "TRANSPLANT": ACT_SVG.TRANSPLANT };
-        const label  = dec === "HARVEST NOW" ? `Harvest ${fd.crop_category} — field ${fd.field_id}` :
-                       dec === "PARTIAL HARVEST" ? `Partial harvest — field ${fd.field_id}` :
-                       dec === "TRANSPLANT" ? `Transplant field ${fd.field_id}` :
-                       `Abandon field ${fd.field_id} (${fd.crop_category})`;
-        actions.push({
-          svg: svgMap[dec] || ACT_SVG.DEFAULT, bg: "#f0ede8", stroke: "#9a9a9a",
-          name: label,
-          tags: [`${fd.maturity_pct?.toFixed(0) || "?"}% mature`, `Fire in ${fmtH(fd.fire_arrival_hours || 0)}`],
-          tagTypes: ["decision", "decision"],
-          tab: "crop",
-        });
-      });
-    }
   }
 
   if (actions.length === 0) {
-    el.innerHTML = '<div class="loading">Run forecaster + agents to get recommendations</div>';
+    el.innerHTML = '<div class="loading">Current economic recommendations are unavailable. Run the agents with current farm data.</div>';
     return;
   }
 
@@ -1309,8 +1268,8 @@ function renderCropPanel() {
     const matPct = fd.maturity_pct ?? 0;
     const arrivalH = fd.fire_arrival_hours;
     const cropEmoji = CROP_EMOJI[fd.crop_category?.toLowerCase()] || "🌱";
-    const priceAcre = CROP_PRICE_PER_ACRE[fd.crop_category?.toLowerCase()] || 3000;
-    const estVal = fmt$(priceAcre * (fd.size_acres || 10));
+    const value = fd.confidence_adjusted_value_usd;
+    const estVal = Number.isFinite(value) ? fmt$(value) : "Value unavailable";
     const dest = destructions.find(d => d.field_id === fd.field_id);
     const hyd  = hydrations.find(h => h.field_id === fd.field_id);
     const fr   = fireRed.find(r => r.field_id === fd.field_id);
