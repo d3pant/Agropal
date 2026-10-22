@@ -37,11 +37,15 @@ for pen in farm["pens"]:
             "count": pen["count"],
             "lat": pen["centroid"]["lat"],
             "lon": pen["centroid"]["lon"],
-            "priority": status_pen["priority_score"],
+            "priority": status_pen.get("priority_score", 0),
             "decision": status_pen["decision"],
             "duration_hours": status_pen["route_duration_hours"],
             "distance_km": status_pen["assigned_evac_site"]["distance_km"] if status_pen["assigned_evac_site"] else 0,
-            "evac_site": status_pen["assigned_evac_site"],
+            "evac_site": status_pen.get("assigned_evac_site") or status_pen.get("candidate_evac_site"),
+            "geometry": status_pen.get("route_geometry"),
+            "assessment_status": status_pen.get("assessment_status"),
+            "duration_hours": status_pen.get("route_duration_hours"),
+            "distance_km": status_pen.get("assigned_evac_site", {}).get("distance_km") if status_pen.get("assigned_evac_site") else None,
             "value": pen["count"] * pen["avg_market_value_usd"],
             "color": color_map.get(pen["species"], "#999")
         })
@@ -186,23 +190,18 @@ html_content = """<!DOCTYPE html>
 
         async function drawRoute(pen) {
             if (!pen.evac_site) return;
-            const { lat, lon } = pen;
-            const { lat: eLat, lon: eLon } = pen.evac_site;
             try {
-                const response = await fetch(`http://router.project-osrm.org/route/v1/driving/${lon},${lat};${eLon},${eLat}?geometries=geojson`);
-                const data = await response.json();
-                if (data.routes && data.routes[0]) {
-                    const route = data.routes[0];
-                    const coords = route.geometry.coordinates.map(c => [c[1], c[0]]);
+                if (pen.geometry && pen.geometry.type === 'LineString') {
+                    const coords = pen.geometry.coordinates.map(c => [c[1], c[0]]);
 
                     const shadowPolyline = L.polyline(coords, { color: '#000000', weight: 10, opacity: 0.2, dashArray: '6, 4', lineCap: 'round' }).addTo(map);
 
                     const polyline = L.polyline(coords, { color: pen.color, weight: 5, opacity: 0.85, dashArray: '8, 3', lineCap: 'round' }).addTo(map);
 
-                    const distance = (route.distance / 1000).toFixed(1);
-                    const duration = (route.duration / 3600).toFixed(2);
+                    const distance = Number(pen.distance_km || 0).toFixed(1);
+                    const duration = Number(pen.duration_hours || 0).toFixed(2);
 
-                    polyline.bindPopup(`<div style="font-size: 11px; color: #1e293b;"><strong>${pen.pen_id} — ${pen.name}</strong><br>${pen.count}x ${pen.species} | $${(pen.value).toLocaleString()}<br><strong>${pen.evac_site.name}</strong><br>${distance}km • ${duration}h</div>`, { minWidth: 220 });
+                    polyline.bindPopup(`<div style="font-size: 11px; color: #1e293b;"><strong>${pen.pen_id} — ${pen.name}</strong><br>${pen.count}x ${pen.species} | $${(pen.value).toLocaleString()}<br><strong>${pen.evac_site.name} (candidate)</strong><br>${distance}km • ${duration}h<br>${pen.assessment_status || 'unknown'} smoke assessment</div>`, { minWidth: 220 });
 
                     drawnRoutes[pen.pen_id] = { polyline, shadow: shadowPolyline };
                 }

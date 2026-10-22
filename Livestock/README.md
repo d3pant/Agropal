@@ -6,7 +6,7 @@ A real-time wildfire evacuation planning system for agricultural operations in S
 
 **Agent 3** of the Reeboot the Earth wildfire agricultural advisory system. Activated by fire threat signals, the livestock agent computes evacuation plans, optimizes animal transport, and coordinates with neighboring farms for resource pooling.
 
-**Current Scenario:** Palisades Fire, 75km away, 11 hours to impact on SDGE Demonstration Farm (450 acres, 497 animals, $832K valuation)
+**Current Scenario:** Runtime JSON files are snapshots and may describe different farms or runs. The agent checks farm identity, coordinates, and run age before assessing routes; see “Smoke and route assessment” below.
 
 ---
 
@@ -351,6 +351,31 @@ python3 visualize.py
 open evacuation_dashboard.html
 ```
 
+### Smoke and route assessment
+
+The livestock run keeps OSRM GeoJSON route geometry and any returned route alternatives. It fetches the NOAA HRRR 8 m near-surface `MASSDEN` forecast through the public NOMADS regional subset endpoint, converts NOAA's kg/m³ values to µg/m³, then samples the route by position and estimated arrival time. The forecast grid is about 3 km, so it cannot resolve smoke differences between nearby roads. Exposure is a comparative concentration-time indicator, not an animal dose or veterinary safety threshold.
+
+The planner reports forecast age, coverage, peak modeled concentration, and integrated exposure. Partial or missing coverage remains unknown and is excluded from exposure ranking. Fire-spread perimeter intersections are reported separately from smoke. Evacuation-zone polygons are not treated as shelters; the bundled fallback sites are unverified candidates until their availability is confirmed. Unknown destination acceptance or fire-arrival time requires human review. The agent does not confirm that animals have moved.
+
+NOAA HRRR data are public and free; attribution is requested. HRRR data are forecast guidance, not measured conditions. OSRM and OpenStreetMap are free/open-source; the public OSRM demo is shared infrastructure and is not an unlimited production service. Install the Python dependencies in the repository `requirements.txt` (including Apache-2.0 `cfgrib` and xarray) to read HRRR GRIB2 fields. If the model field, parser, or network is unavailable, route smoke status remains unknown.
+
+The repository's saved JSON snapshots are not historical validation labels. Accuracy claims require matched historical forecasts and independent surface smoke observations.
+
+To provide a receiving site, add an `evacuation_sites` array to `farm_profile.json`. A destination only counts as verified for the run when its confirmation is no older than six hours and its accepted head count covers that pen:
+
+```json
+{
+  "name": "Receiving Ranch",
+  "lat": 33.4,
+  "lon": -117.2,
+  "availability_confirmed": true,
+  "accepted_head": 100,
+  "verified_at": "2026-10-22T18:00:00Z"
+}
+```
+
+The farmer/operator supplies these confirmation fields; the agent does not independently contact or certify receiving sites. The fire-arrival planning margin defaults to `0.8` and can be changed with `LIVESTOCK_FIRE_ETA_MARGIN` (valid range greater than 0 through 1). Route timing currently assumes loading takes zero minutes because no loading-time evidence is stored; set `LIVESTOCK_LOADING_MINUTES` to an operator-measured delay. The configured delay shifts smoke sampling and reduces the available fire-arrival window.
+
 ### Output
 - **livestock_status.json** - Detailed pen decisions, optimization plan
 - **erpc_message.json** - Message to coordinator
@@ -428,16 +453,9 @@ evacuation_dashboard.html
 
 ---
 
-## Current Scenario Snapshot
+## Snapshot interpretation
 
-**Farm:** SDGE Demonstration Farm (450 acres)
-**Location:** San Diego area (33.225°N, -117.165°W)
-**Threat:** Palisades Fire, 75km away, 11 hours to impact
-**Animals:** 497 head across 6 pens
-**Valuation:** $832,400 (USDA market rates)
-**Transport:** 3 trailers × 2 round trips = 900 capacity
-**Decision:** All animals can evacuate (0% loss)
-**Partnerships:** 3 neighboring farms offer pooling (save 354-373 min each)
+Saved status and livestock JSON files are example/runtime snapshots, not synchronized live state or historical accuracy labels. A livestock recommendation is advisory: `animals_moved_count` remains zero until movement is confirmed outside this agent, and unknown route, smoke, fire-arrival, or destination evidence requires review.
 
 ---
 

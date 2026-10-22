@@ -3,6 +3,8 @@
 import csv
 import io
 import json
+import asyncio
+import uuid
 import math
 import os
 import sys
@@ -26,6 +28,7 @@ from data_sources.open_meteo import fetch_weather
 from models.spread_model import compute_ellipse, ellipse_to_geojson_polygon, time_to_impact
 
 app = FastAPI(title="California Wildfire Map")
+_PIPELINE_LOCK = asyncio.Lock()
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 
 FIRMS_URL = "https://firms.modaps.eosdis.nasa.gov/api/area/csv/{key}/{source}/{area}/2"
@@ -595,6 +598,8 @@ async def _run_forecaster_cycle(
 
     # 5. Build status.json — same structure, all real data
     status = {
+        "run_id": str(uuid.uuid4()),
+        "farm_id": farm_config["farm_id"],
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "farm_lat": farm_lat,
         "farm_lon": farm_lon,
@@ -635,7 +640,8 @@ async def run_forecaster(
     lon: float = Query(None, description="Custom location longitude"),
 ):
     """Run a real forecaster cycle using live NASA FIRMS + Open-Meteo data."""
-    status = await _run_forecaster_cycle(lat, lon)
+    async with _PIPELINE_LOCK:
+        status = await _run_forecaster_cycle(lat, lon)
     return JSONResponse(status)
 
 
@@ -1081,29 +1087,33 @@ CROP_DIR = Path(__file__).parent.parent / "crop_agent"
 
 
 def _sync_forecaster_to_livestock():
-    """Copy latest forecaster outputs into Livestock/ before running the agent."""
-    import shutil
+    """Publish a same-run forecaster snapshot for livestock; never reuse old wake-up data."""
+    if not STATUS_JSON.exists():
+        raise FileNotFoundError(f"Forecaster status missing: {STATUS_JSON}")
+    with open(STATUS_JSON) as f:
+        status = json.load(f)
+    with open(LIVESTOCK_DIR / "farm_profile.json") as f:
+        farm_profile = json.load(f)
+    with open(FORECASTER_DIR / "config" / "farm_config.json") as f:
+        farm_config = json.load(f)
+    import sys
+    if str(FORECASTER_DIR) not in sys.path:
+        sys.path.insert(0, str(FORECASTER_DIR))
+    from livestock_packet import build_livestock_packet
 
-    if STATUS_JSON.exists():
-        shutil.copy(STATUS_JSON, LIVESTOCK_DIR / "status.json")
+    run_id = status.get("run_id")
+    if not run_id:
+        raise ValueError("Forecaster status has no run_id; refusing stale/unversioned input")
+    packet = build_livestock_packet(status, farm_profile, farm_config, run_id)
 
-    wake_up_src = FORECASTER_DIR / "output" / "wake_up_packet.json"
-    if wake_up_src.exists():
-        shutil.copy(wake_up_src, LIVESTOCK_DIR / "wake_up_packet.json")
-    elif STATUS_JSON.exists():
-        # Build minimal wake_up from status so the agent doesn't crash
-        with open(STATUS_JSON) as f:
-            st = json.load(f)
-        smoke_dir = (st.get("wind_direction_degrees") or 0 + 180) % 360
-        minimal = {
-            "affected_zones": [
-                {"zone_id": "Z1", "time_to_impact_hours": 11.0},
-                {"zone_id": "Z2", "time_to_impact_hours": 11.1},
-            ],
-            "smoke_trajectory": {"direction_degrees": smoke_dir},
-        }
-        with open(LIVESTOCK_DIR / "wake_up_packet.json", "w") as f:
-            json.dump(minimal, f)
+    def atomic_json(path: Path, value: dict) -> None:
+        temp_path = path.with_suffix(path.suffix + ".tmp")
+        with open(temp_path, "w") as f:
+            json.dump(value, f, indent=2, default=str)
+        temp_path.replace(path)
+
+    atomic_json(LIVESTOCK_DIR / "status.json", status)
+    atomic_json(LIVESTOCK_DIR / "wake_up_packet.json", packet)
 
 
 @app.get("/api/livestock/status")
@@ -1120,21 +1130,23 @@ def _run_livestock_subprocess() -> dict:
     Returns livestock_status dict or {"error": "..."}."""
     import subprocess
     _sync_forecaster_to_livestock()
+    with open(LIVESTOCK_DIR / "status.json") as f:
+        expected_run_id = json.load(f).get("run_id")
     try:
         result = subprocess.run(
             ["python3", "livestock_agent.py"],
             cwd=LIVESTOCK_DIR,
             capture_output=True, text=True, timeout=180,
         )
-        if LIVESTOCK_STATUS_JSON.exists():
+        if result.returncode == 0 and LIVESTOCK_STATUS_JSON.exists():
             with open(LIVESTOCK_STATUS_JSON) as f:
-                return json.load(f)
+                output = json.load(f)
+            if output.get("run_id") == expected_run_id:
+                return output
+            return {"error": "Livestock output run_id does not match current forecaster run"}
         detail = result.stderr[-400:] if result.stderr else "No output produced"
         return {"error": detail}
     except subprocess.TimeoutExpired:
-        if LIVESTOCK_STATUS_JSON.exists():
-            with open(LIVESTOCK_STATUS_JSON) as f:
-                return json.load(f)
         return {"error": "Livestock agent timed out but may have completed"}
     except Exception as e:
         return {"error": f"Livestock agent error: {e}"}
@@ -1143,7 +1155,8 @@ def _run_livestock_subprocess() -> dict:
 @app.post("/api/livestock/run")
 async def run_livestock_agent():
     """Sync forecaster data then run the livestock evacuation agent."""
-    result = _run_livestock_subprocess()
+    async with _PIPELINE_LOCK:
+        result = await asyncio.to_thread(_run_livestock_subprocess)
     if isinstance(result, dict) and result.get("error") and "timed out" not in result["error"]:
         raise HTTPException(status_code=500, detail=result["error"])
     return JSONResponse(result)
@@ -1269,8 +1282,11 @@ async def run_pipeline(
 ):
     """End-to-end run: forecaster → (crop ‖ livestock) → econ.
     Returns combined report. Long-running (~120-180s)."""
-    import asyncio
+    async with _PIPELINE_LOCK:
+        return await _run_pipeline_cycle(lat, lon)
 
+
+async def _run_pipeline_cycle(lat: float | None, lon: float | None):
     forecaster_status = await _run_forecaster_cycle(lat, lon)
 
     crop_result, livestock_result = await asyncio.gather(

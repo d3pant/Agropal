@@ -190,8 +190,9 @@ def time_to_impact(
     y = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dlon)
     bearing = (math.degrees(math.atan2(x, y)) + 360) % 360
 
-    # Angular difference between wind direction and bearing to target
-    angular_diff = abs((wind_direction_deg - bearing + 180) % 360 - 180)
+    # Wind direction is meteorological (FROM); the fire advances downwind.
+    downwind_bearing = (wind_direction_deg + 180) % 360
+    angular_diff = abs((downwind_bearing - bearing + 180) % 360 - 180)
 
     # Distance from fire to target
     R = 6371.0

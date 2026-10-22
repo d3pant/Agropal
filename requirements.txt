@@ -8,3 +8,5 @@ groq>=0.9
 reportlab>=4.0
 pypdf>=4.0
 tavily-python>=0.3
+cfgrib>=0.9.15
+xarray>=2024.10

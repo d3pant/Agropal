@@ -16,6 +16,7 @@ import logging
 import math
 import os
 import sys
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -169,23 +170,31 @@ def _zone_center(polygon: dict) -> dict:
     return {"lat": sum(lats) / len(lats), "lon": sum(lons) / len(lons)}
 
 
-def compute_zone_impacts(zones: list, fire: dict, wifire: dict | None) -> list:
-    """Compute per-zone time-to-impact from fire location and speed."""
-    speed_kmh = (wifire or {}).get("fire_speed_km_per_hour") or (fire.get("spread_rate_km_per_day", 12) / 24)
-    if speed_kmh <= 0:
-        speed_kmh = 0.5
+def compute_zone_impacts(zones: list, fire: dict, wifire: dict | None, weather: dict | None = None) -> list:
+    """Estimate each zone's fire arrival from the spread model, retaining unknowns."""
+    from models.spread_model import time_to_impact
+    weather = weather or {}
+    location = (fire or {}).get("location") or {}
+    wind_from = weather.get("wind_direction_degrees")
+    if wind_from is None:
+        wind_from = weather.get("wind_direction_deg")
 
     results = []
     for zone in zones:
         center = _zone_center(zone["polygon"])
-        dist = _haversine_km(
-            fire["location"]["lat"], fire["location"]["lon"],
-            center["lat"], center["lon"]
-        )
-        hours = round(dist / speed_kmh, 1)
-        uncertainty = round(hours * 0.25, 1)
+        estimate = None
+        if location.get("lat") is not None and location.get("lon") is not None and wind_from is not None:
+            estimate = time_to_impact(
+                location["lat"], location["lon"], center["lat"], center["lon"],
+                wind_from, weather.get("wind_speed_kmh", 0) or 0,
+                weather.get("soil_moisture", 0.15) or 0.15, (fire or {}).get("frp_mw", 0) or 0,
+            )
+        hours = estimate.get("hours") if estimate else None
+        threatened = estimate.get("threatened") if estimate else None
 
-        if hours <= 12:
+        if hours is None:
+            zone_threat = "UNKNOWN"
+        elif hours <= 12:
             zone_threat = "CRITICAL"
         elif hours <= 48:
             zone_threat = "WARNING"
@@ -199,11 +208,13 @@ def compute_zone_impacts(zones: list, fire: dict, wifire: dict | None) -> list:
             "name": zone["name"],
             "risk_polygon": zone["polygon"],
             "time_to_impact_hours": hours,
-            "time_to_impact_uncertainty_hours": uncertainty,
+            "time_to_impact_uncertainty_hours": None,
+            "threatened": threatened,
+            "impact_model": (wifire or {}).get("source") if wifire else "simplified Rothermel direction/time estimate",
             "threat_level": zone_threat,
         })
 
-    return sorted(results, key=lambda z: z["time_to_impact_hours"])
+    return sorted(results, key=lambda z: z["time_to_impact_hours"] if z["time_to_impact_hours"] is not None else float("inf"))
 
 
 # ---------------------------------------------------------------------------
@@ -499,6 +510,10 @@ class Forecaster:
         next_update = update_intervals.get(self.threat_level, 120)
 
         self.status = {
+            "run_id": str(uuid.uuid4()),
+            "farm_id": self.farm_config.get("farm_id"),
+            "farm_lat": self.farm_config.get("location", {}).get("lat"),
+            "farm_lon": self.farm_config.get("location", {}).get("lon"),
             "timestamp": _utc_now(),
             "stage": self.stage,
             "threat_level": self.threat_level,
@@ -533,12 +548,29 @@ class Forecaster:
     def write_wake_up_packet(self) -> None:
         """Write wake_up_packet.json."""
         zones = self.farm_config["affected_zones"]
-        zone_impacts = compute_zone_impacts(zones, self._fire, self._wifire)
+        zone_impacts = compute_zone_impacts(zones, self._fire, self._wifire, self._weather)
         agent_messages = build_agent_messages(zone_impacts, self._fire)
 
         weather = self._weather or {}
 
+        from livestock_packet import build_livestock_packet
+        location = self.farm_config["location"]
+        livestock_profile = {"farm_id": self.farm_config["farm_id"], "centroid": location}
+        livestock_profile_path = Path(__file__).parent.parent / "Livestock" / "farm_profile.json"
+        if livestock_profile_path.exists():
+            try:
+                with open(livestock_profile_path) as profile_file:
+                    livestock_profile = json.load(profile_file)
+            except (OSError, json.JSONDecodeError) as exc:
+                logger.warning("Could not load livestock profile for packet: %s", exc)
+        livestock_contract = build_livestock_packet(
+            self.status,
+            livestock_profile,
+            self.farm_config,
+            self.status.get("run_id") or str(uuid.uuid4()),
+        )
         self.wake_up_packet = {
+            **livestock_contract,
             "activation_timestamp": _utc_now(),
             "farm_id": self.farm_config["farm_id"],
             "threat_level": self.threat_level,
@@ -551,7 +583,6 @@ class Forecaster:
                 **weather,
                 "forecast_valid_until": weather.get("forecast_valid_until"),
             },
-            "smoke_trajectory": self._estimate_smoke_trajectory(zone_impacts),
             "messages_to_agents": agent_messages,
         }
 

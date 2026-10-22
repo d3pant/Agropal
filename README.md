@@ -73,12 +73,16 @@ Threat levels used system-wide: `GREEN → WATCH → WARNING → CRITICAL → EM
 | `forecaster/forms/` | Bundled government form templates: `ccc_576.pdf` (official USDA Notice of Loss) |
 | `crop_agent/crop_agent.py` | Groq llama-3.3-70b crop agent — field decisions, fire reduction, hydration, economic impact |
 | `Livestock/livestock_agent.py` | Async OSRM-routed evacuation planner — per-pen decisions, transport pool, cost optimization |
+| `Livestock/smoke_exposure.py` | Route-geometry smoke sampling and separate modeled fire-perimeter checks |
+| `forecaster/data_sources/smoke.py` | Free public NOAA HRRR near-surface smoke forecast adapter |
 | `backend/main.py` | FastAPI server — agent orchestration, pipeline endpoint, briefing/insurance/report endpoints |
 | `backend/static/setup.html` | 3-step farm onboarding form (location, livestock, crops) |
 | `backend/static/dashboard.html` | Live threat dashboard with map, threat gauge, agent panels |
 | `backend/static/financial.html` | Financial overview: exposure, ROI actions, aid programs, insurance form download |
 | `backend/static/briefing.html` | Plan tab: download briefing PDF in 10 languages + n8n webhook send |
 | `.env.example` | Template for `.env` with all required API keys |
+
+Livestock route assessments use returned OSRM road geometry and public NOAA HRRR smoke forecasts where available. The roughly 3 km forecast grid supports comparative route screening, not animal dose or safety thresholds. Partial data, stale or mismatched farm snapshots, unknown fire-arrival times, and unverified receiving sites are surfaced for human review. See [Livestock/README.md](Livestock/README.md#smoke-and-route-assessment) for data provenance, free/open-source dependencies, and operating limits.
 
 ---
 

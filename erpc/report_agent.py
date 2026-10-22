@@ -120,11 +120,18 @@ def _section_livestock(livestock_status, erpc, t, styles) -> list:
         elems.append(para(t("No livestock evacuation plan has been generated yet."), styles))
         return elems
 
-    intro = (
-        f"You have {total} animals at risk across all pens. Of those, {can_evac} can be "
-        f"safely evacuated using available trailers and routes, protecting an estimated "
-        f"{fmt_money(save_value)} in livestock value."
-    )
+    if (livestock_status or {}).get("assessment_status") in {"unknown", "partial", "invalid"}:
+        risk_value = (erpc or {}).get("animal_valuation_at_risk", 0)
+        intro = (
+            f"There are {total} animals at risk, valued at {fmt_money(risk_value)}. "
+            "The evacuation route assessment needs review; no safe evacuation or shelter decision is confirmed."
+        )
+    else:
+        intro = (
+            f"You have {total} animals at risk across all pens. The current route plan estimates "
+            f"that {can_evac} can be evacuated using available trailers and routes; the estimated "
+            f"value protected is {fmt_money(save_value)}."
+        )
     if potential_loss > 0:
         intro += (
             f" If evacuation cannot be fully completed, the potential loss is "

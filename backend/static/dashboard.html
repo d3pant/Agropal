@@ -1463,11 +1463,11 @@ function renderLivestockPanel() {
           <div style="font-size:20px;font-weight:700;">${s.total_animals_at_risk}</div>
         </div>
         <div style="padding:12px;background:var(--green-light);border-radius:10px;text-align:center;">
-          <div style="font-size:10px;color:var(--green);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:4px;">Can Evacuate</div>
+          <div style="font-size:10px;color:var(--green);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:4px;">Route Feasible</div>
           <div style="font-size:20px;font-weight:700;color:var(--green);">${s.animals_can_evacuate}</div>
         </div>
         <div style="padding:12px;background:var(--green-light);border-radius:10px;text-align:center;">
-          <div style="font-size:10px;color:var(--green);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:4px;">Value Saved</div>
+          <div style="font-size:10px;color:var(--green);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:4px;">Potential Value Protected</div>
           <div style="font-size:20px;font-weight:700;color:var(--green);">${fmt$(s.value_can_save_usd)}</div>
         </div>
         <div style="padding:12px;background:${s.potential_loss_usd>0?"#fde8e8":"var(--green-light)"};border-radius:10px;text-align:center;">
@@ -1475,6 +1475,7 @@ function renderLivestockPanel() {
           <div style="font-size:20px;font-weight:700;color:${lossColor};">${fmt$(s.potential_loss_usd)}</div>
         </div>
       </div>
+      ${livestockData.assessment_status && livestockData.assessment_status !== "assessed" ? `<div style="margin-top:10px;padding:10px 12px;background:var(--amber-light);border-radius:8px;color:var(--amber);font-size:13px;">Route assessment needs review. No movement is confirmed. ${livestockData.smoke_forecast?.reason || "Smoke or route data is incomplete."}</div>` : ""}
       <div style="margin-top:10px;font-size:12px;color:var(--text2);">${tc.vehicles} trailers · ${tc.capacity_per_vehicle} head/vehicle · ${tc.trips_per_trailer || tc.trips_available || "—"} trips/trailer · ${tc.total_capacity} head total capacity</div>
       ${livestockData.animals_moved_count != null ? `<div style="margin-top:4px;font-size:12px;color:var(--text3);">Phase: <b style="color:var(--text);">${livestockData.phase || "—"}</b> · Moved: ${livestockData.animals_moved_count} · Remaining: ${livestockData.animals_remaining_count}</div>` : ""}
     `;
